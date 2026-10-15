@@ -110,29 +110,13 @@ public sealed class GeminiLlmClient : IDisposable
         {
             throw;
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException)
         {
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex.StackTrace);
-            Console.WriteLine(ex.InnerException?.Message);
-            Console.WriteLine(ex.InnerException?.StackTrace);
-            Console.WriteLine(ex.InnerException?.InnerException?.Message);
-            Console.WriteLine(ex.InnerException?.InnerException?.StackTrace);
-            Console.WriteLine(ex.InnerException?.InnerException?.InnerException?.Message);
-            Console.WriteLine(ex.InnerException?.InnerException?.InnerException?.StackTrace);
             throw new GeminiClientException(GeminiClientError.NetworkFailure);
         }
-        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex.StackTrace);
-            Console.WriteLine(ex.InnerException?.Message);
-            Console.WriteLine(ex.InnerException?.StackTrace);
-            Console.WriteLine(ex.InnerException?.InnerException?.Message);
-            Console.WriteLine(ex.InnerException?.InnerException?.StackTrace);
-            Console.WriteLine(ex.InnerException?.InnerException?.InnerException?.Message);
-            Console.WriteLine(ex.InnerException?.InnerException?.InnerException?.StackTrace);
-            throw new GeminiClientException(GeminiClientError.NetworkFailure);
+           throw new GeminiClientException(GeminiClientError.NetworkFailure);
         }
         catch (JsonException)
         {
@@ -150,8 +134,6 @@ public sealed class GeminiLlmClient : IDisposable
 
     private static GeminiClientError ClassifyFailure(HttpStatusCode statusCode, string raw)
     {
-        Console.WriteLine(raw);
-        Console.WriteLine(statusCode);
         if (statusCode == HttpStatusCode.TooManyRequests || BodyIndicates(raw, "RESOURCE_EXHAUSTED"))
         {
             return GeminiClientError.RateLimitExceeded;
