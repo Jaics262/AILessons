@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="AIPromptLab.Tests/AIPromptLab.Tests.csproj" />
+  <Project Path="AIPromptLab/AIPromptLab.csproj" />
+</Solution>
