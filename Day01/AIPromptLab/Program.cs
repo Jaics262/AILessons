@@ -1,4 +1,16 @@
-﻿using var cancellation = new CancellationTokenSource();
+﻿using Serilog;
+using Serilog.Events;
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Warning()
+    .WriteTo.File(
+        path: Path.Combine("logs", "ai-prompt-lab-.log"),
+        rollingInterval: RollingInterval.Day,
+        restrictedToMinimumLevel: LogEventLevel.Warning,
+        shared: true)
+    .CreateLogger();
+
+using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) =>
 {
     eventArgs.Cancel = true;
@@ -38,18 +50,21 @@ try
         }
         catch (GeminiClientException ex)
         {
+            LogFailure(ex);
             Console.Error.WriteLine();
             Console.Error.WriteLine(DescribeApiError(ex.Error));
             Console.Error.WriteLine();
         }
         catch (IOException ex)
         {
+            Log.Error(ex, "Could not read input.");
             Console.Error.WriteLine($"Could not read input: {ex.Message}");
             Environment.ExitCode = 1;
             break;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Log.Error(ex, "Something went wrong while contacting the API.");
             Console.Error.WriteLine("Something went wrong while contacting the API. Try again.");
             Console.Error.WriteLine();
         }
@@ -57,14 +72,20 @@ try
 }
 catch (GeminiClientException ex)
 {
+    LogFailure(ex);
     Console.Error.WriteLine();
     Console.Error.WriteLine(DescribeApiError(ex.Error));
     Environment.ExitCode = 1;
 }
-catch (Exception)
+catch (Exception ex)
 {
+    Log.Error(ex, "Something went wrong while contacting the API.");
     Console.Error.WriteLine("Something went wrong while contacting the API. Try again.");
     Environment.ExitCode = 1;
+}
+finally
+{
+    Log.CloseAndFlush();
 }
 
 static PromptInput? ReadPromptFields(CancellationToken cancellationToken)
@@ -103,6 +124,7 @@ static string? ReadRequiredField(string label, CancellationToken cancellationTok
             return value;
         }
 
+        Log.Warning("{Label} cannot be empty or whitespace.", label);
         Console.WriteLine($"{label} cannot be empty or whitespace. Try again.");
     }
 
@@ -135,6 +157,18 @@ static void DisplayResponse(string response)
     Console.WriteLine(response);
     Console.WriteLine();
     Console.WriteLine("-----");
+}
+
+static void LogFailure(GeminiClientException exception)
+{
+    var message = DescribeApiError(exception.Error);
+    if (exception.Error is GeminiClientError.RateLimitExceeded or GeminiClientError.EmptyResponse)
+    {
+        Log.Warning(exception, "{Message}", message);
+        return;
+    }
+
+    Log.Error(exception, "{Message}", message);
 }
 
 static string DescribeApiError(GeminiClientError error)
