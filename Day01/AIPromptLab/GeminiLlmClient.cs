@@ -112,6 +112,8 @@ public sealed class GeminiLlmClient : IDisposable
                         keyPoints = new
                         {
                             type = "ARRAY",
+                            minItems = LearningSummary.RequiredKeyPointCount,
+                            maxItems = LearningSummary.RequiredKeyPointCount,
                             items = new { type = "STRING" }
                         },
                         difficulty = new

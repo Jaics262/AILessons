@@ -52,7 +52,9 @@ public sealed class GeminiLlmClientTests
     {
         var handler = new RecordingHandler(
             HttpStatusCode.OK,
-            SuccessJson(LearningSummaryJson(summary: "Hello world", keyPoints: ["Mass attracts mass"])));
+            SuccessJson(LearningSummaryJson(
+                summary: "Hello world",
+                keyPoints: ["Mass attracts mass", "Distance weakens the pull", "Weight depends on mass"])));
 
         using (new ApiKeyScope(ApiKey))
         using (var client = CreateClient(handler))
@@ -62,7 +64,9 @@ public sealed class GeminiLlmClientTests
             Assert.Equal("Gravity", response.Title);
             Assert.Equal("Hello world", response.Summary);
             Assert.Equal(LearningSummary.Beginner, response.Difficulty);
-            Assert.Equal("Mass attracts mass", Assert.Single(response.KeyPoints));
+            Assert.Equal(
+                ["Mass attracts mass", "Distance weakens the pull", "Weight depends on mass"],
+                response.KeyPoints);
             Assert.NotNull(handler.Request);
             Assert.Equal(HttpMethod.Post, handler.Request.Method);
             Assert.Equal(
@@ -72,6 +76,8 @@ public sealed class GeminiLlmClientTests
             Assert.Equal(ApiKey, Assert.Single(handler.Request.Headers.GetValues("x-goog-api-key")));
             Assert.Contains(Prompt, handler.Body, StringComparison.Ordinal);
             Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Body, StringComparison.Ordinal);
+            Assert.Contains("\"minItems\":3", handler.Body, StringComparison.Ordinal);
+            Assert.Contains("\"maxItems\":3", handler.Body, StringComparison.Ordinal);
             Assert.DoesNotContain(ApiKey, handler.Body, StringComparison.Ordinal);
             AssertSummaryDoesNotContainApiKey(response);
         }
@@ -110,6 +116,24 @@ public sealed class GeminiLlmClientTests
 
             Assert.Equal(GeminiClientError.InvalidResponse, exception.Error);
             Assert.DoesNotContain(ApiKey, exception.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task SendPromptAsync_rejects_a_summary_that_does_not_have_exactly_three_key_points(int count)
+    {
+        var keyPoints = Enumerable.Range(1, count).Select(index => $"Point {index}").ToArray();
+        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson(LearningSummaryJson(keyPoints: keyPoints)));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidResponse, exception.Error);
         }
     }
 
@@ -252,12 +276,9 @@ public sealed class GeminiLlmClientTests
         string title = "Gravity",
         string summary = "Objects pull on each other.",
         string difficulty = LearningSummary.Beginner,
-        params string[] keyPoints)
+        IReadOnlyList<string>? keyPoints = null)
     {
-        if (keyPoints.Length == 0)
-        {
-            keyPoints = ["Mass attracts mass"];
-        }
+        keyPoints ??= ["Mass attracts mass", "Distance weakens the pull", "Weight depends on mass"];
 
         var points = string.Join(",", keyPoints.Select(JsonString));
         return "{\"title\":" + JsonString(title)

@@ -6,6 +6,7 @@ public sealed class LearningSummary
     public const string Beginner = "Beginner";
     public const string Intermediate = "Intermediate";
     public const string Advanced = "Advanced";
+    public const int RequiredKeyPointCount = 3;
 
     public static readonly IReadOnlyList<string> AllowedDifficulties = [Beginner, Intermediate, Advanced];
 
@@ -29,6 +30,13 @@ public sealed class LearningSummary
             throw new ArgumentException(
                 $"Difficulty must be one of: {string.Join(", ", AllowedDifficulties)}.",
                 nameof(difficulty));
+        }
+
+        if (keyPoints.Count != RequiredKeyPointCount)
+        {
+            throw new ArgumentException(
+                $"Key points must contain exactly {RequiredKeyPointCount} items.",
+                nameof(keyPoints));
         }
 
         if (keyPoints.Exists(point => string.IsNullOrWhiteSpace(point)))
