@@ -38,8 +38,8 @@ try
             var prompt = BuildPrompt(input);
             DisplayPrompt(prompt);
 
-            var response = await client.SendPromptAsync(prompt, cancellation.Token);
-            DisplayResponse(response);
+            var summary = await client.SendPromptAsync(prompt, cancellation.Token);
+            DisplayResponse(summary);
             Console.WriteLine();
             Console.WriteLine("Press Ctrl+C to exit.");
             Console.WriteLine();
@@ -50,7 +50,11 @@ try
         }
         catch (GeminiClientException ex)
         {
-            LogFailure(ex);
+            if (ex.Error is not GeminiClientError.InvalidResponse)
+            {
+                LogFailure(ex);
+            }
+
             Console.Error.WriteLine();
             Console.Error.WriteLine(DescribeApiError(ex.Error));
             Console.Error.WriteLine();
@@ -150,13 +154,49 @@ static void DisplayPrompt(string prompt)
     Console.WriteLine("-----------------------------");
 }
 
-static void DisplayResponse(string response)
+static void DisplayResponse(LearningSummary summary)
 {
     Console.WriteLine("--AI response");
     Console.WriteLine();
-    Console.WriteLine(response);
-    Console.WriteLine();
+    WriteProperty("Title", summary.Title);
+    WriteProperty("Difficulty", summary.Difficulty);
+    WriteProperty("Summary", summary.Summary);
+    WriteKeyPoints(summary.KeyPoints);
     Console.WriteLine("-----");
+}
+
+static void WriteProperty(string label, string? value)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        Console.WriteLine($"{label} is blank.");
+    }
+    else
+    {
+        Console.WriteLine($"{label}: {value}");
+    }
+
+    Console.WriteLine();
+}
+
+static void WriteKeyPoints(IReadOnlyList<string>? keyPoints)
+{
+    if (keyPoints is null || keyPoints.Count == 0 || keyPoints.All(string.IsNullOrWhiteSpace))
+    {
+        Console.WriteLine("Key points are blank.");
+        Console.WriteLine();
+        return;
+    }
+
+    Console.WriteLine("Key points:");
+    foreach (var point in keyPoints)
+    {
+        Console.WriteLine(string.IsNullOrWhiteSpace(point)
+            ? "- A key point is blank."
+            : $"- {point}");
+    }
+
+    Console.WriteLine();
 }
 
 static void LogFailure(GeminiClientException exception)
@@ -187,6 +227,8 @@ static string DescribeApiError(GeminiClientError error)
             "The API rejected the request. Try again later.",
         GeminiClientError.EmptyResponse =>
             "Empty response from the API. Try again.",
+        GeminiClientError.InvalidResponse =>
+            "The API returned a response that is not a valid learning summary. Try again.",
         _ =>
             "Something went wrong while contacting the API. Try again."
     };

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Serilog;
 
 public enum GeminiClientError
 {
@@ -9,13 +10,19 @@ public enum GeminiClientError
     NetworkFailure,
     RateLimitExceeded,
     ServerRejection,
-    EmptyResponse
+    EmptyResponse,
+    InvalidResponse
 }
 
 public sealed class GeminiClientException : Exception
 {
     public GeminiClientException(GeminiClientError error)
-        : base(error.ToString())
+        : this(error, innerException: null)
+    {
+    }
+
+    public GeminiClientException(GeminiClientError error, Exception? innerException)
+        : base(error.ToString(), innerException)
     {
         Error = error;
     }
@@ -28,6 +35,12 @@ public sealed class GeminiLlmClient : IDisposable
     private const string Model = "gemini-3.8-flash";
     private const string ApiKeyVariable = "GEMINI_API_KEY";
     private const string ApiKeyHeader = "x-goog-api-key";
+
+    private static readonly JsonSerializerOptions ResponseJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
@@ -66,7 +79,7 @@ public sealed class GeminiLlmClient : IDisposable
         _httpClient.DefaultRequestHeaders.Add(ApiKeyHeader, _apiKey);
     }
 
-    public async Task<string> SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    public async Task<LearningSummary> SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(prompt))
         {
@@ -85,6 +98,35 @@ public sealed class GeminiLlmClient : IDisposable
                         new { text = prompt }
                     }
                 }
+            },
+            generationConfig = new
+            {
+                responseMimeType = "application/json",
+                responseSchema = new
+                {
+                    type = "OBJECT",
+                    properties = new
+                    {
+                        title = new { type = "STRING" },
+                        summary = new { type = "STRING" },
+                        keyPoints = new
+                        {
+                            type = "ARRAY",
+                            items = new { type = "STRING" }
+                        },
+                        difficulty = new
+                        {
+                            type = "STRING",
+                            @enum = new[]
+                            {
+                                LearningSummary.Beginner,
+                                LearningSummary.Intermediate,
+                                LearningSummary.Advanced
+                            }
+                        }
+                    },
+                    required = new[] { "title", "summary", "keyPoints", "difficulty" }
+                }
             }
         };
 
@@ -98,13 +140,15 @@ public sealed class GeminiLlmClient : IDisposable
                 throw new GeminiClientException(ClassifyFailure(response.StatusCode, raw));
             }
 
-            var text = Redact(ParseResponseText(raw));
+            var apiResponse = JsonSerializer.Deserialize<GeminiApiResponse>(raw, ResponseJsonOptions)
+                ?? throw new GeminiClientException(GeminiClientError.EmptyResponse);
+            var text = Redact(apiResponse.ReadModelText());
             if (string.IsNullOrWhiteSpace(text))
             {
                 throw new GeminiClientException(GeminiClientError.EmptyResponse);
             }
 
-            return text;
+            return DeserializeSummary(text);
         }
         catch (GeminiClientException)
         {
@@ -118,9 +162,22 @@ public sealed class GeminiLlmClient : IDisposable
         {
            throw new GeminiClientException(GeminiClientError.NetworkFailure);
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
-            throw new GeminiClientException(GeminiClientError.EmptyResponse);
+            throw new GeminiClientException(GeminiClientError.EmptyResponse, ex);
+        }
+    }
+
+    private static LearningSummary DeserializeSummary(string text)
+    {
+        try
+        {
+            return LearningSummary.Deserialize(text);
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            Log.Error(ex, "The API response could not be deserialized to a learning summary.");
+            throw new GeminiClientException(GeminiClientError.InvalidResponse, ex);
         }
     }
 
@@ -158,52 +215,5 @@ public sealed class GeminiLlmClient : IDisposable
     private string Redact(string value)
     {
         return value.Replace(_apiKey, string.Empty, StringComparison.Ordinal);
-    }
-
-    private static string ParseResponseText(string raw)
-    {
-        using var document = JsonDocument.Parse(raw);
-        var root = document.RootElement;
-
-        if (root.TryGetProperty("promptFeedback", out var feedback) &&
-            feedback.TryGetProperty("blockReason", out _))
-        {
-            throw new GeminiClientException(GeminiClientError.EmptyResponse);
-        }
-
-        if (!root.TryGetProperty("candidates", out var candidates) ||
-            candidates.ValueKind != JsonValueKind.Array ||
-            candidates.GetArrayLength() == 0)
-        {
-            throw new GeminiClientException(GeminiClientError.EmptyResponse);
-        }
-
-        var candidate = candidates[0];
-        if (!candidate.TryGetProperty("content", out var content) ||
-            !content.TryGetProperty("parts", out var parts) ||
-            parts.ValueKind != JsonValueKind.Array)
-        {
-            throw new GeminiClientException(GeminiClientError.EmptyResponse);
-        }
-
-        var texts = new List<string>();
-        foreach (var part in parts.EnumerateArray())
-        {
-            if (part.TryGetProperty("text", out var textElement))
-            {
-                var text = textElement.GetString();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    texts.Add(text);
-                }
-            }
-        }
-
-        if (texts.Count == 0)
-        {
-            throw new GeminiClientException(GeminiClientError.EmptyResponse);
-        }
-
-        return string.Concat(texts);
     }
 }

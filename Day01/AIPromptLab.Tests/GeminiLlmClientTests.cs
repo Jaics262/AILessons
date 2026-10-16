@@ -48,16 +48,21 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
-    public async Task SendPromptAsync_posts_the_prompt_and_returns_the_response_text()
+    public async Task SendPromptAsync_posts_the_prompt_and_returns_the_learning_summary()
     {
-        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson("Hello", " world"));
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "Hello world", keyPoints: ["Mass attracts mass"])));
 
         using (new ApiKeyScope(ApiKey))
         using (var client = CreateClient(handler))
         {
             var response = await client.SendPromptAsync(Prompt);
 
-            Assert.Equal("Hello world", response);
+            Assert.Equal("Gravity", response.Title);
+            Assert.Equal("Hello world", response.Summary);
+            Assert.Equal(LearningSummary.Beginner, response.Difficulty);
+            Assert.Equal("Mass attracts mass", Assert.Single(response.KeyPoints));
             Assert.NotNull(handler.Request);
             Assert.Equal(HttpMethod.Post, handler.Request.Method);
             Assert.Equal(
@@ -66,23 +71,61 @@ public sealed class GeminiLlmClientTests
             Assert.DoesNotContain(ApiKey, handler.Request.RequestUri.Query, StringComparison.Ordinal);
             Assert.Equal(ApiKey, Assert.Single(handler.Request.Headers.GetValues("x-goog-api-key")));
             Assert.Contains(Prompt, handler.Body, StringComparison.Ordinal);
+            Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Body, StringComparison.Ordinal);
             Assert.DoesNotContain(ApiKey, handler.Body, StringComparison.Ordinal);
-            Assert.DoesNotContain(ApiKey, response, StringComparison.Ordinal);
+            AssertSummaryDoesNotContainApiKey(response);
         }
     }
 
     [Fact]
     public async Task SendPromptAsync_removes_the_api_key_from_the_response_text()
     {
-        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson($"before {ApiKey} after"));
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: $"before {ApiKey} after")));
 
         using (new ApiKeyScope(ApiKey))
         using (var client = CreateClient(handler))
         {
             var response = await client.SendPromptAsync(Prompt);
 
-            Assert.Equal("before  after", response);
-            Assert.DoesNotContain(ApiKey, response, StringComparison.Ordinal);
+            Assert.Equal("before  after", response.Summary);
+            AssertSummaryDoesNotContainApiKey(response);
+        }
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"title\":\"Only title\"}")]
+    [InlineData("{\"title\":\"T\",\"summary\":\"S\",\"keyPoints\":[\"a\"],\"difficulty\":\"Expert\"}")]
+    [InlineData("null")]
+    public async Task SendPromptAsync_classifies_an_invalid_learning_summary(string text)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson(text));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidResponse, exception.Error);
+            Assert.DoesNotContain(ApiKey, exception.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_invalid_summary_does_not_include_the_api_key_in_the_error()
+    {
+        var text = LearningSummaryJson(summary: $"before {ApiKey} after", difficulty: "Expert");
+        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson(text));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidResponse, exception.Error);
+            Assert.DoesNotContain(ApiKey, exception.ToString(), StringComparison.Ordinal);
         }
     }
 
@@ -195,6 +238,32 @@ public sealed class GeminiLlmClientTests
         };
 
         return new GeminiLlmClient(httpClient);
+    }
+
+    private static void AssertSummaryDoesNotContainApiKey(LearningSummary summary)
+    {
+        Assert.DoesNotContain(ApiKey, summary.Title, StringComparison.Ordinal);
+        Assert.DoesNotContain(ApiKey, summary.Summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(ApiKey, summary.Difficulty, StringComparison.Ordinal);
+        Assert.DoesNotContain(ApiKey, string.Join(" ", summary.KeyPoints), StringComparison.Ordinal);
+    }
+
+    private static string LearningSummaryJson(
+        string title = "Gravity",
+        string summary = "Objects pull on each other.",
+        string difficulty = LearningSummary.Beginner,
+        params string[] keyPoints)
+    {
+        if (keyPoints.Length == 0)
+        {
+            keyPoints = ["Mass attracts mass"];
+        }
+
+        var points = string.Join(",", keyPoints.Select(JsonString));
+        return "{\"title\":" + JsonString(title)
+            + ",\"summary\":" + JsonString(summary)
+            + ",\"keyPoints\":[" + points + "]"
+            + ",\"difficulty\":" + JsonString(difficulty) + "}";
     }
 
     private static string SuccessJson(params string[] parts)
