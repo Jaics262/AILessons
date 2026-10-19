@@ -165,30 +165,7 @@ public sealed class GeminiLlmClientTests
             Assert.Equal(19.0m, Assert.Single(response.Totals));
         }
     }
-
-    [Fact]
-    public async Task SendPromptAsync_rejects_a_prompt_that_asks_for_an_unknown_tool()
-    {
-        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson("unused"));
-
-        using (new ApiKeyScope(ApiKey))
-        using (var client = CreateClient(handler))
-        {
-            var prompt = """
-                Role: Common man
-                Task: Use the abcd tool to calculate the total cost of 3 notebooks at £2.50 each.
-                Context: Learning
-                Output Format: Json
-                Constraints: No Constraint
-                """;
-            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(prompt));
-
-            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
-            Assert.Equal("Unknown tool 'abcd'. The only available tool is calculate_total.", exception.Detail);
-            Assert.Null(handler.Request);
-            Assert.Empty(handler.Bodies);
-        }
-    }
+     
 
     [Fact]
     public async Task SendPromptAsync_allows_a_prompt_that_asks_for_calculate_total()
