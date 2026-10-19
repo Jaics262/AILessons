@@ -65,7 +65,7 @@ try
             }
 
             Console.Error.WriteLine();
-            Console.Error.WriteLine(DescribeApiError(ex.Error));
+            Console.Error.WriteLine(ex.Detail ?? DescribeApiError(ex.Error));
             Console.Error.WriteLine();
         }
         catch (IOException ex)

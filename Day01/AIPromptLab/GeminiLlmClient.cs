@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Serilog;
 
 public enum GeminiClientError
@@ -29,6 +30,8 @@ public sealed class GeminiClientException : Exception
     }
 
     public GeminiClientError Error { get; }
+
+    public string? Detail { get; init; }
 }
 
 public sealed class GeminiLlmClient : IDisposable
@@ -38,6 +41,9 @@ public sealed class GeminiLlmClient : IDisposable
     private const string ApiKeyHeader = "x-goog-api-key";
     private const string CalculateTotalFunctionName = "calculate_total";
     private const int MaxFunctionRounds = 4;
+    private static readonly Regex RequestedToolName = new(
+        @"\buse\s+(?:the\s+)?(?<name>[A-Za-z_][A-Za-z0-9_]*)\s+tool\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static readonly JsonSerializerOptions ResponseJsonOptions = new()
     {
@@ -88,6 +94,8 @@ public sealed class GeminiLlmClient : IDisposable
         {
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
+
+        RejectUnknownRequestedTool(prompt);
 
         var contents = new List<object>
         {
@@ -193,6 +201,28 @@ public sealed class GeminiLlmClient : IDisposable
         {
             throw new GeminiClientException(GeminiClientError.EmptyResponse, ex);
         }
+    }
+
+    private static void RejectUnknownRequestedTool(string prompt)
+    {
+        var match = RequestedToolName.Match(prompt);
+        if (!match.Success)
+        {
+            return;
+        }
+
+        var name = match.Groups["name"].Value;
+        if (string.Equals(name, CalculateTotalFunctionName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var message = $"Unknown tool '{name}'. The only available tool is calculate_total.";
+        Log.Error("{Message}", message);
+        throw new GeminiClientException(GeminiClientError.InvalidFunctionCall)
+        {
+            Detail = message
+        };
     }
 
     private async Task<GeminiApiResponse> PostGenerateContentAsync(

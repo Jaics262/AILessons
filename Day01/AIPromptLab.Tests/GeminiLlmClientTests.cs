@@ -167,6 +167,49 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_rejects_a_prompt_that_asks_for_an_unknown_tool()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.OK, SuccessJson("unused"));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var prompt = """
+                Role: Common man
+                Task: Use the abcd tool to calculate the total cost of 3 notebooks at £2.50 each.
+                Context: Learning
+                Output Format: Json
+                Constraints: No Constraint
+                """;
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Equal("Unknown tool 'abcd'. The only available tool is calculate_total.", exception.Detail);
+            Assert.Null(handler.Request);
+            Assert.Empty(handler.Bodies);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_allows_a_prompt_that_asks_for_calculate_total()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "The notebooks cost 7.50.")));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var response = await client.SendPromptAsync(
+                "Task: Use the calculate_total tool to calculate the total cost of 3 notebooks.");
+
+            Assert.Single(handler.Bodies);
+            Assert.NotNull(response.Summary);
+            Assert.Equal("The notebooks cost 7.50.", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
     public async Task SendPromptAsync_returns_the_summary_when_the_response_has_no_function_call()
     {
         var handler = new RecordingHandler(
