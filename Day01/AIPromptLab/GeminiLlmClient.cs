@@ -95,7 +95,6 @@ public sealed class GeminiLlmClient : IDisposable
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-        RejectUnknownRequestedTool(prompt);
 
         var contents = new List<object>
         {
@@ -203,27 +202,6 @@ public sealed class GeminiLlmClient : IDisposable
         }
     }
 
-    private static void RejectUnknownRequestedTool(string prompt)
-    {
-        var match = RequestedToolName.Match(prompt);
-        if (!match.Success)
-        {
-            return;
-        }
-
-        var name = match.Groups["name"].Value;
-        if (string.Equals(name, CalculateTotalFunctionName, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        var message = $"Unknown tool '{name}'. The only available tool is calculate_total.";
-        Log.Error("{Message}", message);
-        throw new GeminiClientException(GeminiClientError.InvalidFunctionCall)
-        {
-            Detail = message
-        };
-    }
 
     private async Task<GeminiApiResponse> PostGenerateContentAsync(
         List<object> contents,
