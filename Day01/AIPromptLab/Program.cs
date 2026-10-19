@@ -239,7 +239,7 @@ static string DescribeApiError(GeminiClientError error)
         GeminiClientError.InvalidResponse =>
             "The API returned a response that is not a valid learning summary. Try again.",
         GeminiClientError.InvalidFunctionCall =>
-            "The function call was rejected. Quantity must be a whole number that is not negative, and unit price cannot be negative.",
+            "The function call was rejected. Quantity must be a whole number greater than zero, and unit price cannot be negative.",
         _ =>
             "Something went wrong while contacting the API. Try again."
     };

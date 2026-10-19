@@ -63,6 +63,8 @@ public sealed class GeminiLlmClientTests
 
             Assert.NotNull(response.Summary);
             Assert.Empty(response.FunctionCalls);
+            Assert.Empty(response.Totals);
+            Assert.Single(handler.Bodies);
             Assert.Equal("Gravity", response.Summary.Title);
             Assert.Equal("Hello world", response.Summary.Summary);
             Assert.Equal(LearningSummary.Beginner, response.Summary.Difficulty);
@@ -164,7 +166,145 @@ public sealed class GeminiLlmClientTests
         }
     }
 
+    [Fact]
+    public async Task SendPromptAsync_returns_the_summary_when_the_response_has_no_function_call()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "No tool was needed.")));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var response = await client.SendPromptAsync(Prompt);
+
+            Assert.Single(handler.Bodies);
+            Assert.Empty(response.Totals);
+            Assert.Empty(response.FunctionCalls);
+            Assert.NotNull(response.Summary);
+            Assert.Equal("No tool was needed.", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_requests_a_learning_summary_when_the_model_text_is_not_json()
+    {
+        var calls = 0;
+        var prose = SuccessJson("```json {\"topic\":\"Umbraco\"} ```");
+        var finalSummary = SuccessJson(LearningSummaryJson(summary: "Umbraco is a content management system."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? prose : finalSummary;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var response = await client.SendPromptAsync(Prompt);
+
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.DoesNotContain("responseMimeType", handler.Bodies[0], StringComparison.Ordinal);
+            Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("functionDeclarations", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("Umbraco", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.NotNull(response.Summary);
+            Assert.Equal("Umbraco is a content management system.", response.Summary.Summary);
+            Assert.Empty(response.Totals);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_executes_every_function_call_in_one_response()
+    {
+        var calls = 0;
+        var functionCalls = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"calculate_total","args":{"quantity":2,"unitPrice":9.5}},"thoughtSignature":"sig-1"},{"functionCall":{"id":"c2","name":"calculate_total","args":{"quantity":1,"unitPrice":5}},"thoughtSignature":"sig-2"}]}}]}
+            """;
+        var finalSummary = SuccessJson(LearningSummaryJson(summary: "Both totals are included."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? functionCalls : finalSummary;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var response = await client.SendPromptAsync(Prompt);
+
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Equal(2, CountOccurrences(handler.Bodies[1], "\"functionResponse\""));
+            Assert.Contains("\"id\":\"c1\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"id\":\"c2\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-1\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-2\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"total\":19.0", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"total\":5", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Equal([19.0m, 5.0m], response.Totals);
+            Assert.NotNull(response.Summary);
+            Assert.Equal("Both totals are included.", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_executes_a_function_call_when_the_response_also_contains_text()
+    {
+        var calls = 0;
+        var functionCall = """
+            {"candidates":[{"content":{"parts":[{"text":"I will calculate that.","thoughtSignature":"sig-text"},{"functionCall":{"name":"calculate_total","args":{"quantity":3,"unitPrice":2.5}},"thoughtSignature":"sig-abc"}]}}]}
+            """;
+        var finalSummary = SuccessJson(LearningSummaryJson(summary: "Three notebooks cost 7.50."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? functionCall : finalSummary;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var response = await client.SendPromptAsync(Prompt);
+
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Contains("\"text\":\"I will calculate that.\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-text\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"total\":7.5", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Equal(7.5m, Assert.Single(response.Totals));
+            Assert.NotNull(response.Summary);
+            Assert.Equal("Three notebooks cost 7.50.", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_rejects_the_response_when_any_function_call_is_invalid()
+    {
+        const string body = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":2,"unitPrice":9.5}}},{"functionCall":{"name":"calculate_total","args":{"quantity":0,"unitPrice":5}}}]}}]}
+            """;
+        var handler = new RecordingHandler(HttpStatusCode.OK, body);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Single(handler.Bodies);
+        }
+    }
+
     [Theory]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":0,"unitPrice":9.5}}}]}}]}""")]
     [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":-1,"unitPrice":9.5}}}]}}]}""")]
     [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":2.5,"unitPrice":9.5}}}]}}]}""")]
     [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":2,"unitPrice":-1}}}]}}]}""")]
@@ -336,6 +476,19 @@ public sealed class GeminiLlmClientTests
         Assert.DoesNotContain(ApiKey, summary.Summary, StringComparison.Ordinal);
         Assert.DoesNotContain(ApiKey, summary.Difficulty, StringComparison.Ordinal);
         Assert.DoesNotContain(ApiKey, string.Join(" ", summary.KeyPoints), StringComparison.Ordinal);
+    }
+
+    private static int CountOccurrences(string value, string token)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = value.IndexOf(token, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += token.Length;
+        }
+
+        return count;
     }
 
     private static string LearningSummaryJson(

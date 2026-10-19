@@ -118,7 +118,29 @@ public sealed class GeminiLlmClient : IDisposable
                         throw new GeminiClientException(GeminiClientError.EmptyResponse);
                     }
 
-                    return new GeminiPromptResult(DeserializeSummary(Redact(text)), functionCalls, totals);
+                    var safeText = Redact(text);
+                    if (TryDeserializeSummary(safeText, out var summary))
+                    {
+                        return new GeminiPromptResult(summary, functionCalls, totals);
+                    }
+
+                    if (!expectFunctionCall)
+                    {
+                        return new GeminiPromptResult(DeserializeSummary(safeText), functionCalls, totals);
+                    }
+
+                    Log.Warning("The model text was not a learning summary. Requesting the structured summary.");
+                    contents.Add(new { role = "model", parts = CreateModelTextParts(apiResponse) });
+                    contents.Add(new
+                    {
+                        role = "user",
+                        parts = new object[]
+                        {
+                            new { text = "Format that answer as the learning summary JSON." }
+                        }
+                    });
+                    expectFunctionCall = false;
+                    continue;
                 }
 
                 if (!expectFunctionCall)
@@ -133,6 +155,11 @@ public sealed class GeminiLlmClient : IDisposable
                 {
                     if (part.FunctionCall is null)
                     {
+                        if (!string.IsNullOrEmpty(part.Text) || !string.IsNullOrEmpty(part.ThoughtSignature))
+                        {
+                            modelParts.Add(CreateTextPart(part));
+                        }
+
                         continue;
                     }
 
@@ -317,6 +344,16 @@ public sealed class GeminiLlmClient : IDisposable
         return new { functionCall, thoughtSignature = part.ThoughtSignature };
     }
 
+    private static object CreateTextPart(GeminiPart part)
+    {
+        if (string.IsNullOrEmpty(part.ThoughtSignature))
+        {
+            return new { text = part.Text };
+        }
+
+        return new { text = part.Text, thoughtSignature = part.ThoughtSignature };
+    }
+
     private static object CreateFunctionResponsePart(GeminiFunctionCall call, decimal total)
     {
         var functionResponse = new Dictionary<string, object?>
@@ -332,11 +369,62 @@ public sealed class GeminiLlmClient : IDisposable
         return new { functionResponse };
     }
 
+    private static List<object> CreateModelTextParts(GeminiApiResponse apiResponse)
+    {
+        var modelParts = new List<object>();
+        foreach (var part in apiResponse.ReadParts())
+        {
+            if (!string.IsNullOrEmpty(part.Text) || !string.IsNullOrEmpty(part.ThoughtSignature))
+            {
+                modelParts.Add(CreateTextPart(part));
+            }
+        }
+
+        return modelParts;
+    }
+
+    private static bool TryDeserializeSummary(string text, out LearningSummary? summary)
+    {
+        try
+        {
+            summary = LearningSummary.Deserialize(NormalizeModelJson(text));
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            summary = null;
+            return false;
+        }
+    }
+
+    private static string NormalizeModelJson(string text)
+    {
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            return text;
+        }
+
+        var lineBreak = trimmed.IndexOf('\n');
+        if (lineBreak < 0)
+        {
+            return text;
+        }
+
+        var body = trimmed[(lineBreak + 1)..].TrimEnd();
+        if (body.EndsWith("```", StringComparison.Ordinal))
+        {
+            body = body[..^3].TrimEnd();
+        }
+
+        return body.Trim();
+    }
+
     private static LearningSummary DeserializeSummary(string text)
     {
         try
         {
-            return LearningSummary.Deserialize(text);
+            return LearningSummary.Deserialize(NormalizeModelJson(text));
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException)
         {
