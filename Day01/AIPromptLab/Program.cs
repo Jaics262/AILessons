@@ -38,8 +38,17 @@ try
             var prompt = BuildPrompt(input);
             DisplayPrompt(prompt);
 
-            var summary = await client.SendPromptAsync(prompt, cancellation.Token);
-            DisplayResponse(summary);
+            var result = await client.SendPromptAsync(prompt, cancellation.Token);
+            foreach (var total in result.Totals)
+            {
+                Console.WriteLine($"Total: {total}");
+                Console.WriteLine();
+            }
+
+            if (result.Summary is not null)
+            {
+                DisplayResponse(result.Summary);
+            }
             Console.WriteLine();
             Console.WriteLine("Press Ctrl+C to exit.");
             Console.WriteLine();
@@ -50,7 +59,7 @@ try
         }
         catch (GeminiClientException ex)
         {
-            if (ex.Error is not GeminiClientError.InvalidResponse)
+            if (ex.Error is not (GeminiClientError.InvalidResponse or GeminiClientError.InvalidFunctionCall))
             {
                 LogFailure(ex);
             }
@@ -229,6 +238,8 @@ static string DescribeApiError(GeminiClientError error)
             "Empty response from the API. Try again.",
         GeminiClientError.InvalidResponse =>
             "The API returned a response that is not a valid learning summary. Try again.",
+        GeminiClientError.InvalidFunctionCall =>
+            "The function call was rejected. Quantity must be a whole number that is not negative, and unit price cannot be negative.",
         _ =>
             "Something went wrong while contacting the API. Try again."
     };

@@ -11,7 +11,8 @@ public enum GeminiClientError
     RateLimitExceeded,
     ServerRejection,
     EmptyResponse,
-    InvalidResponse
+    InvalidResponse,
+    InvalidFunctionCall
 }
 
 public sealed class GeminiClientException : Exception
@@ -35,6 +36,8 @@ public sealed class GeminiLlmClient : IDisposable
     private const string Model = "gemini-3.8-flash";
     private const string ApiKeyVariable = "GEMINI_API_KEY";
     private const string ApiKeyHeader = "x-goog-api-key";
+    private const string CalculateTotalFunctionName = "calculate_total";
+    private const int MaxFunctionRounds = 4;
 
     private static readonly JsonSerializerOptions ResponseJsonOptions = new()
     {
@@ -79,78 +82,73 @@ public sealed class GeminiLlmClient : IDisposable
         _httpClient.DefaultRequestHeaders.Add(ApiKeyHeader, _apiKey);
     }
 
-    public async Task<LearningSummary> SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    public async Task<GeminiPromptResult> SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(prompt))
         {
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-        var requestUri = $"v1beta/models/{Model}:generateContent";
-        var body = new
+        var contents = new List<object>
         {
-            contents = new[]
+            new
             {
-                new
-                {
-                    parts = new[]
-                    {
-                        new { text = prompt }
-                    }
-                }
-            },
-            generationConfig = new
-            {
-                responseMimeType = "application/json",
-                responseSchema = new
-                {
-                    type = "OBJECT",
-                    properties = new
-                    {
-                        title = new { type = "STRING" },
-                        summary = new { type = "STRING" },
-                        keyPoints = new
-                        {
-                            type = "ARRAY",
-                            minItems = LearningSummary.RequiredKeyPointCount,
-                            maxItems = LearningSummary.RequiredKeyPointCount,
-                            items = new { type = "STRING" }
-                        },
-                        difficulty = new
-                        {
-                            type = "STRING",
-                            @enum = new[]
-                            {
-                                LearningSummary.Beginner,
-                                LearningSummary.Intermediate,
-                                LearningSummary.Advanced
-                            }
-                        }
-                    },
-                    required = new[] { "title", "summary", "keyPoints", "difficulty" }
-                }
+                role = "user",
+                parts = new object[] { new { text = prompt } }
             }
         };
+        var totals = new List<decimal>();
 
         try
         {
-            using var response = await _httpClient.PostAsJsonAsync(requestUri, body, cancellationToken);
-            var raw = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
+            var expectFunctionCall = true;
+            for (var round = 0; round < MaxFunctionRounds; round++)
             {
-                throw new GeminiClientException(ClassifyFailure(response.StatusCode, raw));
+                var apiResponse = await PostGenerateContentAsync(
+                    contents,
+                    includeTools: expectFunctionCall,
+                    includeSchema: !expectFunctionCall,
+                    cancellationToken);
+                var text = apiResponse.ReadModelText();
+                var functionCalls = apiResponse.ReadFunctionCalls();
+                if (functionCalls.Count == 0)
+                {
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        throw new GeminiClientException(GeminiClientError.EmptyResponse);
+                    }
+
+                    return new GeminiPromptResult(DeserializeSummary(Redact(text)), functionCalls, totals);
+                }
+
+                if (!expectFunctionCall)
+                {
+                    Log.Error("The model requested a function call after the function result was returned.");
+                    throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
+                }
+
+                var modelParts = new List<object>();
+                var responseParts = new List<object>();
+                foreach (var part in apiResponse.ReadParts())
+                {
+                    if (part.FunctionCall is null)
+                    {
+                        continue;
+                    }
+
+                    var total = DispatchFunction(part.FunctionCall);
+                    totals.Add(total);
+                    modelParts.Add(CreateFunctionCallPart(part));
+                    responseParts.Add(CreateFunctionResponsePart(part.FunctionCall, total));
+                }
+
+                contents.Add(new { role = "model", parts = modelParts });
+                contents.Add(new { role = "user", parts = responseParts });
+                expectFunctionCall = false;
             }
 
-            var apiResponse = JsonSerializer.Deserialize<GeminiApiResponse>(raw, ResponseJsonOptions)
-                ?? throw new GeminiClientException(GeminiClientError.EmptyResponse);
-            var text = Redact(apiResponse.ReadModelText());
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                throw new GeminiClientException(GeminiClientError.EmptyResponse);
-            }
-
-            return DeserializeSummary(text);
+            Log.Error("The model did not return a final answer after the function result.");
+            throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
         }
         catch (GeminiClientException)
         {
@@ -162,12 +160,176 @@ public sealed class GeminiLlmClient : IDisposable
         }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-           throw new GeminiClientException(GeminiClientError.NetworkFailure);
+            throw new GeminiClientException(GeminiClientError.NetworkFailure);
         }
         catch (JsonException ex)
         {
             throw new GeminiClientException(GeminiClientError.EmptyResponse, ex);
         }
+    }
+
+    private async Task<GeminiApiResponse> PostGenerateContentAsync(
+        List<object> contents,
+        bool includeTools,
+        bool includeSchema,
+        CancellationToken cancellationToken)
+    {
+        var requestUri = $"v1beta/models/{Model}:generateContent";
+        object body = includeSchema
+            ? new { contents, generationConfig = LearningSummarySchema() }
+            : includeTools
+                ? new { contents, tools = CalculateTotalTools() }
+                : new { contents };
+
+        using var response = await _httpClient.PostAsJsonAsync(requestUri, body, cancellationToken);
+        var raw = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var detail = Redact(raw.Length <= 800 ? raw : raw[..800]);
+            Log.Error("Gemini returned HTTP {StatusCode}: {Body}", (int)response.StatusCode, detail);
+            throw new GeminiClientException(ClassifyFailure(response.StatusCode, raw));
+        }
+
+        return JsonSerializer.Deserialize<GeminiApiResponse>(raw, ResponseJsonOptions)
+            ?? throw new GeminiClientException(GeminiClientError.EmptyResponse);
+    }
+
+    private static object LearningSummarySchema()
+    {
+        return new
+        {
+            responseMimeType = "application/json",
+            responseSchema = new
+            {
+                type = "OBJECT",
+                properties = new
+                {
+                    title = new { type = "STRING" },
+                    summary = new { type = "STRING" },
+                    keyPoints = new
+                    {
+                        type = "ARRAY",
+                        minItems = LearningSummary.RequiredKeyPointCount,
+                        maxItems = LearningSummary.RequiredKeyPointCount,
+                        items = new { type = "STRING" }
+                    },
+                    difficulty = new
+                    {
+                        type = "STRING",
+                        @enum = new[]
+                        {
+                            LearningSummary.Beginner,
+                            LearningSummary.Intermediate,
+                            LearningSummary.Advanced
+                        }
+                    }
+                },
+                required = new[] { "title", "summary", "keyPoints", "difficulty" }
+            }
+        };
+    }
+
+    private static object CalculateTotalTools()
+    {
+        return new[]
+        {
+            new
+            {
+                functionDeclarations = new[]
+                {
+                    new
+                    {
+                        name = CalculateTotalFunctionName,
+                        description = "Calculate the tool price from quantity and unit price",
+                        parameters = new
+                        {
+                            type = "OBJECT",
+                            properties = new
+                            {
+                                quantity = new { type = "INTEGER" },
+                                unitPrice = new { type = "NUMBER" }
+                            },
+                            required = new[] { "quantity", "unitPrice" }
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    private static decimal DispatchFunction(GeminiFunctionCall call)
+    {
+        try
+        {
+            return call.Name switch
+            {
+                CalculateTotalFunctionName => ExecuteCalculateTotal(call),
+                _ => throw new ArgumentException($"Unknown function '{call.Name}'.")
+            };
+        }
+        catch (ArgumentException ex)
+        {
+            Log.Error(ex, "The function call was rejected.");
+            throw new GeminiClientException(GeminiClientError.InvalidFunctionCall, ex);
+        }
+    }
+
+    private static decimal ExecuteCalculateTotal(GeminiFunctionCall call)
+    {
+        if (call.Args.ValueKind != JsonValueKind.Object ||
+            !call.Args.TryGetProperty("quantity", out var quantityElement) ||
+            !call.Args.TryGetProperty("unitPrice", out var unitPriceElement))
+        {
+            throw new ArgumentException("calculate_total requires quantity and unitPrice.");
+        }
+
+        if (quantityElement.ValueKind != JsonValueKind.Number || !quantityElement.TryGetInt32(out var quantity))
+        {
+            throw new ArgumentException("Quantity must be an integer.");
+        }
+
+        if (unitPriceElement.ValueKind != JsonValueKind.Number || !unitPriceElement.TryGetDecimal(out var unitPrice))
+        {
+            throw new ArgumentException("Unit price must be a number.");
+        }
+
+        return new CalculateTotalTool().CalculateTotal(quantity, unitPrice);
+    }
+
+    private static object CreateFunctionCallPart(GeminiPart part)
+    {
+        var call = part.FunctionCall!;
+        var functionCall = new Dictionary<string, object?>
+        {
+            ["name"] = call.Name,
+            ["args"] = call.Args
+        };
+        if (!string.IsNullOrEmpty(call.Id))
+        {
+            functionCall["id"] = call.Id;
+        }
+
+        if (string.IsNullOrEmpty(part.ThoughtSignature))
+        {
+            return new { functionCall };
+        }
+
+        return new { functionCall, thoughtSignature = part.ThoughtSignature };
+    }
+
+    private static object CreateFunctionResponsePart(GeminiFunctionCall call, decimal total)
+    {
+        var functionResponse = new Dictionary<string, object?>
+        {
+            ["name"] = call.Name,
+            ["response"] = new Dictionary<string, decimal> { ["total"] = total }
+        };
+        if (!string.IsNullOrEmpty(call.Id))
+        {
+            functionResponse["id"] = call.Id;
+        }
+
+        return new { functionResponse };
     }
 
     private static LearningSummary DeserializeSummary(string text)
