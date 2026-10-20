@@ -80,6 +80,7 @@ public sealed class GeminiLlmClientTests
             Assert.Equal(ApiKey, Assert.Single(handler.Request.Headers.GetValues("x-goog-api-key")));
             Assert.Contains(Prompt, handler.Body, StringComparison.Ordinal);
             Assert.Contains("\"name\":\"calculate_total\"", handler.Body, StringComparison.Ordinal);
+            Assert.Contains("\"name\":\"calculate_vat\"", handler.Body, StringComparison.Ordinal);
             Assert.Contains("\"description\":\"Calculate the tool price from quantity and unit price\"", handler.Body, StringComparison.Ordinal);
             Assert.Contains("\"quantity\":{\"type\":\"INTEGER\"}", handler.Body, StringComparison.Ordinal);
             Assert.Contains("\"unitPrice\":{\"type\":\"NUMBER\"}", handler.Body, StringComparison.Ordinal);
@@ -155,10 +156,8 @@ public sealed class GeminiLlmClientTests
             Assert.Contains("\"thoughtSignature\":\"sig-abc\"", handler.Bodies[1], StringComparison.Ordinal);
             Assert.Contains("\"name\":\"calculate_total\"", handler.Bodies[1], StringComparison.Ordinal);
             Assert.Contains("\"total\":19.0", handler.Bodies[1], StringComparison.Ordinal);
-            Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Bodies[1], StringComparison.Ordinal);
-            Assert.Contains("\"minItems\":3", handler.Bodies[1], StringComparison.Ordinal);
-            Assert.Contains("\"maxItems\":3", handler.Bodies[1], StringComparison.Ordinal);
-            Assert.DoesNotContain("functionDeclarations", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("functionDeclarations", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("responseMimeType", handler.Bodies[1], StringComparison.Ordinal);
             Assert.Contains(Prompt, handler.Bodies[1], StringComparison.Ordinal);
             Assert.NotNull(response.Summary);
             Assert.Equal("The total is 19.0", response.Summary.Summary);
@@ -168,21 +167,54 @@ public sealed class GeminiLlmClientTests
      
 
     [Fact]
-    public async Task SendPromptAsync_allows_a_prompt_that_asks_for_calculate_total()
+    public async Task SendPromptAsync_calls_calculate_vat_and_returns_the_final_summary()
     {
-        var handler = new RecordingHandler(
-            HttpStatusCode.OK,
-            SuccessJson(LearningSummaryJson(summary: "The notebooks cost 7.50.")));
+        var calls = 0;
+        var functionCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":10,"rate":20}},"thoughtSignature":"sig-vat"}]}}]}
+            """;
+        var finalSummary = SuccessJson(LearningSummaryJson(summary: "The VAT is 2.00."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? functionCall : finalSummary;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
 
         using (new ApiKeyScope(ApiKey))
         using (var client = CreateClient(handler))
         {
-            var response = await client.SendPromptAsync(
-                "Task: Use the calculate_total tool to calculate the total cost of 3 notebooks.");
+            var response = await client.SendPromptAsync("Task: Use the calculate_vat tool.");
 
-            Assert.Single(handler.Bodies);
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Contains("\"name\":\"calculate_vat\"", handler.Bodies[0], StringComparison.Ordinal);
+            Assert.Contains("\"name\":\"calculate_total\"", handler.Bodies[0], StringComparison.Ordinal);
+            Assert.Contains("\"vat\":2", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-vat\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Equal(2m, Assert.Single(response.Totals));
             Assert.NotNull(response.Summary);
-            Assert.Equal("The notebooks cost 7.50.", response.Summary.Summary);
+            Assert.Equal("The VAT is 2.00.", response.Summary.Summary);
+        }
+    }
+
+    [Theory]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":0,"rate":20}}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":10,"rate":0}}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":-1,"rate":20}}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":10,"rate":-5}}}]}}]}""")]
+    public async Task SendPromptAsync_rejects_a_calculate_vat_call_that_is_not_greater_than_zero(string body)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.OK, body);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Single(handler.Bodies);
         }
     }
 
@@ -342,6 +374,112 @@ public sealed class GeminiLlmClientTests
             Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
             Assert.Single(handler.Bodies);
             Assert.DoesNotContain(ApiKey, exception.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_calls_calculate_total_then_calculate_vat_before_the_summary()
+    {
+        var calls = 0;
+        var totalCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":2,"unitPrice":10}},"thoughtSignature":"sig-total"}]}}]}
+            """;
+        var vatCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":20,"rate":10}},"thoughtSignature":"sig-vat"}]}}]}
+            """;
+        var finalSummary = SuccessJson(LearningSummaryJson(summary: "The total is 20 and the VAT is 2."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ switch
+            {
+                0 => totalCall,
+                1 => vatCall,
+                _ => finalSummary
+            };
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var response = await client.SendPromptAsync(Prompt);
+
+            Assert.Equal(3, handler.Bodies.Count);
+            Assert.Contains("\"total\":20", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("functionDeclarations", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("responseMimeType", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"vat\":2", handler.Bodies[2], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-total\"", handler.Bodies[2], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-vat\"", handler.Bodies[2], StringComparison.Ordinal);
+            Assert.Equal([20m, 2m], response.Totals);
+            Assert.NotNull(response.Summary);
+            Assert.Equal("The total is 20 and the VAT is 2.", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_rejects_an_unsupported_function_name()
+    {
+        const string body = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"abcd","args":{"quantity":2,"unitPrice":9.5}}}]}}]}
+            """;
+        var handler = new RecordingHandler(HttpStatusCode.OK, body);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Single(handler.Bodies);
+        }
+    }
+
+    [Theory]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{}}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":2}}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total"}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{}}}]}}]}""")]
+    [InlineData("""{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_vat","args":{"amount":10}}}]}}]}""")]
+    public async Task SendPromptAsync_rejects_a_function_call_with_missing_arguments(string body)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.OK, body);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Single(handler.Bodies);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_stops_after_four_function_calling_rounds()
+    {
+        const string functionCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":1,"unitPrice":1}},"thoughtSignature":"sig"}]}}]}
+            """;
+        var handler = new RecordingHandler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(functionCall, Encoding.UTF8, "application/json")
+        }));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Equal(5, handler.Bodies.Count);
+            Assert.All(handler.Bodies.Take(4), body => Assert.Contains("functionDeclarations", body, StringComparison.Ordinal));
+            Assert.DoesNotContain("functionDeclarations", handler.Bodies[4], StringComparison.Ordinal);
+            Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Bodies[4], StringComparison.Ordinal);
+            Assert.Equal(4, CountOccurrences(handler.Bodies[4], "\"functionResponse\""));
         }
     }
 

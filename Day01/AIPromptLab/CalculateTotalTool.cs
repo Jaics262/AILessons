@@ -14,4 +14,19 @@ public sealed class CalculateTotalTool
 
         return quantity * unitPrice;
     }
+
+    public decimal CalculateVat(decimal amount, decimal rate)
+    {
+        if (amount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(amount), "Amount must be greater than zero.");
+        }
+
+        if (rate <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rate), "Rate must be greater than zero.");
+        }
+
+        return amount * rate / 100m;
+    }
 }

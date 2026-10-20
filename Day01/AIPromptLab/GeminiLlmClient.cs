@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Serilog;
 
 public enum GeminiClientError
@@ -40,10 +39,8 @@ public sealed class GeminiLlmClient : IDisposable
     private const string ApiKeyVariable = "GEMINI_API_KEY";
     private const string ApiKeyHeader = "x-goog-api-key";
     private const string CalculateTotalFunctionName = "calculate_total";
+    private const string CalculateVatFunctionName = "calculate_vat";
     private const int MaxFunctionRounds = 4;
-    private static readonly Regex RequestedToolName = new(
-        @"\buse\s+(?:the\s+)?(?<name>[A-Za-z_][A-Za-z0-9_]*)\s+tool\b",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static readonly JsonSerializerOptions ResponseJsonOptions = new()
     {
@@ -95,7 +92,6 @@ public sealed class GeminiLlmClient : IDisposable
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-
         var contents = new List<object>
         {
             new
@@ -108,13 +104,15 @@ public sealed class GeminiLlmClient : IDisposable
 
         try
         {
-            var expectFunctionCall = true;
-            for (var round = 0; round < MaxFunctionRounds; round++)
+            var functionRounds = 0;
+            var formattingSummary = false;
+            while (functionRounds <= MaxFunctionRounds)
             {
+                var allowTools = functionRounds < MaxFunctionRounds && !formattingSummary;
                 var apiResponse = await PostGenerateContentAsync(
                     contents,
-                    includeTools: expectFunctionCall,
-                    includeSchema: !expectFunctionCall,
+                    includeTools: allowTools,
+                    includeSchema: !allowTools,
                     cancellationToken);
                 var text = apiResponse.ReadModelText();
                 var functionCalls = apiResponse.ReadFunctionCalls();
@@ -131,7 +129,7 @@ public sealed class GeminiLlmClient : IDisposable
                         return new GeminiPromptResult(summary, functionCalls, totals);
                     }
 
-                    if (!expectFunctionCall)
+                    if (formattingSummary || !allowTools)
                     {
                         return new GeminiPromptResult(DeserializeSummary(safeText), functionCalls, totals);
                     }
@@ -146,13 +144,13 @@ public sealed class GeminiLlmClient : IDisposable
                             new { text = "Format that answer as the learning summary JSON." }
                         }
                     });
-                    expectFunctionCall = false;
+                    formattingSummary = true;
                     continue;
                 }
 
-                if (!expectFunctionCall)
+                if (!allowTools)
                 {
-                    Log.Error("The model requested a function call after the function result was returned.");
+                    Log.Error("The model requested a function call after {MaxFunctionRounds} rounds.", MaxFunctionRounds);
                     throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
                 }
 
@@ -178,10 +176,10 @@ public sealed class GeminiLlmClient : IDisposable
 
                 contents.Add(new { role = "model", parts = modelParts });
                 contents.Add(new { role = "user", parts = responseParts });
-                expectFunctionCall = false;
+                functionRounds++;
             }
 
-            Log.Error("The model did not return a final answer after the function result.");
+            Log.Error("The model did not return a final answer after {MaxFunctionRounds} function rounds.", MaxFunctionRounds);
             throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
         }
         catch (GeminiClientException)
@@ -270,7 +268,7 @@ public sealed class GeminiLlmClient : IDisposable
         {
             new
             {
-                functionDeclarations = new[]
+                functionDeclarations = new object[]
                 {
                     new
                     {
@@ -286,6 +284,21 @@ public sealed class GeminiLlmClient : IDisposable
                             },
                             required = new[] { "quantity", "unitPrice" }
                         }
+                    },
+                    new
+                    {
+                        name = CalculateVatFunctionName,
+                        description = "Calculate the VAT amount from an amount and a percentage rate",
+                        parameters = new
+                        {
+                            type = "OBJECT",
+                            properties = new
+                            {
+                                amount = new { type = "NUMBER" },
+                                rate = new { type = "NUMBER" }
+                            },
+                            required = new[] { "amount", "rate" }
+                        }
                     }
                 }
             }
@@ -299,6 +312,7 @@ public sealed class GeminiLlmClient : IDisposable
             return call.Name switch
             {
                 CalculateTotalFunctionName => ExecuteCalculateTotal(call),
+                CalculateVatFunctionName => ExecuteCalculateVat(call),
                 _ => throw new ArgumentException($"Unknown function '{call.Name}'.")
             };
         }
@@ -329,6 +343,28 @@ public sealed class GeminiLlmClient : IDisposable
         }
 
         return new CalculateTotalTool().CalculateTotal(quantity, unitPrice);
+    }
+
+    private static decimal ExecuteCalculateVat(GeminiFunctionCall call)
+    {
+        if (call.Args.ValueKind != JsonValueKind.Object ||
+            !call.Args.TryGetProperty("amount", out var amountElement) ||
+            !call.Args.TryGetProperty("rate", out var rateElement))
+        {
+            throw new ArgumentException("calculate_vat requires amount and rate.");
+        }
+
+        if (amountElement.ValueKind != JsonValueKind.Number || !amountElement.TryGetDecimal(out var amount))
+        {
+            throw new ArgumentException("Amount must be a number.");
+        }
+
+        if (rateElement.ValueKind != JsonValueKind.Number || !rateElement.TryGetDecimal(out var rate))
+        {
+            throw new ArgumentException("Rate must be a number.");
+        }
+
+        return new CalculateTotalTool().CalculateVat(amount, rate);
     }
 
     private static object CreateFunctionCallPart(GeminiPart part)
@@ -367,7 +403,10 @@ public sealed class GeminiLlmClient : IDisposable
         var functionResponse = new Dictionary<string, object?>
         {
             ["name"] = call.Name,
-            ["response"] = new Dictionary<string, decimal> { ["total"] = total }
+            ["response"] = new Dictionary<string, decimal>
+            {
+                [call.Name == CalculateVatFunctionName ? "vat" : "total"] = total
+            }
         };
         if (!string.IsNullOrEmpty(call.Id))
         {
