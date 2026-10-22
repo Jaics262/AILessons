@@ -483,6 +483,220 @@ public sealed class GeminiLlmClientTests
         }
     }
 
+    [Fact]
+    public async Task SendPromptAsync_sends_the_previous_turn_with_the_next_prompt()
+    {
+        var calls = 0;
+        var first = SuccessJson(LearningSummaryJson(summary: "First answer."));
+        var second = SuccessJson(LearningSummaryJson(summary: "Second answer."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? first : second;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            await client.SendPromptAsync("First question about gravity.");
+            var response = await client.SendPromptAsync("Second question about gravity.");
+
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Contains("First question about gravity.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("First answer.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("Second question about gravity.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"role\":\"model\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("functionDeclarations", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.NotNull(response.Summary);
+            Assert.Equal("Second answer.", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_preserves_function_calls_and_tool_responses_in_later_turns()
+    {
+        var calls = 0;
+        var totalCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"calculate_total","args":{"quantity":2,"unitPrice":9.5}},"thoughtSignature":"sig-abc"}]}}]}
+            """;
+        var vatCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"id":"c2","name":"calculate_vat","args":{"amount":19,"rate":20}},"thoughtSignature":"sig-vat"}]}}]}
+            """;
+        var firstSummary = SuccessJson(LearningSummaryJson(summary: "The total is 19.0"));
+        var secondSummary = SuccessJson(LearningSummaryJson(summary: "The VAT is 3.8"));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ switch
+            {
+                0 => totalCall,
+                1 => firstSummary,
+                2 => vatCall,
+                _ => secondSummary
+            };
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            await client.SendPromptAsync("Calculate the notebook total.");
+            var response = await client.SendPromptAsync("Calculate the VAT on that total.");
+
+            var followUp = handler.Bodies[2];
+            Assert.Contains("Calculate the notebook total.", followUp, StringComparison.Ordinal);
+            Assert.Contains("\"id\":\"c1\"", followUp, StringComparison.Ordinal);
+            Assert.Contains("\"name\":\"calculate_total\"", followUp, StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-abc\"", followUp, StringComparison.Ordinal);
+            Assert.Contains("\"functionResponse\"", followUp, StringComparison.Ordinal);
+            Assert.Contains("\"total\":19.0", followUp, StringComparison.Ordinal);
+            Assert.Contains("The total is 19.0", followUp, StringComparison.Ordinal);
+            Assert.Contains("Calculate the VAT on that total.", followUp, StringComparison.Ordinal);
+            Assert.Contains("\"vat\":3.8", handler.Bodies[3], StringComparison.Ordinal);
+            Assert.Contains("\"id\":\"c2\"", handler.Bodies[3], StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-vat\"", handler.Bodies[3], StringComparison.Ordinal);
+            Assert.Equal(3.8m, Assert.Single(response.Totals));
+            Assert.NotNull(response.Summary);
+            Assert.Equal("The VAT is 3.8", response.Summary.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task ResetConversation_removes_history_from_the_next_request()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "Stored answer.")));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            await client.SendPromptAsync("Remember this question.");
+            client.ResetConversation();
+            await client.SendPromptAsync("A question after reset.");
+
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.DoesNotContain("Remember this question.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("Stored answer.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("A question after reset.", handler.Bodies[1], StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_does_not_store_a_rejected_turn()
+    {
+        var calls = 0;
+        var rejected = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"abcd","args":{"quantity":1,"unitPrice":1}}}]}}]}
+            """;
+        var summary = SuccessJson(LearningSummaryJson(summary: "A fresh answer."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? rejected : summary;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() =>
+                client.SendPromptAsync("Do not remember this rejected prompt."));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            await client.SendPromptAsync("A prompt that should stand alone.");
+
+            Assert.DoesNotContain("Do not remember this rejected prompt.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("A prompt that should stand alone.", handler.Bodies[1], StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_keeps_conversation_history_separate_for_each_client()
+    {
+        var firstHandler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "Answer for session A.")));
+        var secondHandler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "Answer for session B.")));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var first = CreateClient(firstHandler))
+        using (var second = CreateClient(secondHandler))
+        {
+            await first.SendPromptAsync("Question for session A.");
+            await second.SendPromptAsync("Question for session B.");
+            await first.SendPromptAsync("Follow-up for session A.");
+
+            Assert.Contains("Question for session A.", firstHandler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("Answer for session A.", firstHandler.Bodies[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("Question for session B.", firstHandler.Bodies[1], StringComparison.Ordinal);
+            Assert.Single(secondHandler.Bodies);
+            Assert.DoesNotContain("Question for session A.", secondHandler.Bodies[0], StringComparison.Ordinal);
+            Assert.Contains("Question for session B.", secondHandler.Bodies[0], StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_still_stops_after_four_function_rounds_when_history_exists()
+    {
+        var calls = 0;
+        var summary = SuccessJson(LearningSummaryJson(summary: "Remember this answer."));
+        const string functionCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":1,"unitPrice":1}},"thoughtSignature":"sig"}]}}]}
+            """;
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0 ? summary : functionCall;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            await client.SendPromptAsync("Store this turn.");
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() =>
+                client.SendPromptAsync("Keep calling the tool."));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Equal(6, handler.Bodies.Count);
+            Assert.Contains("Store this turn.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("Remember this answer.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.All(handler.Bodies.Skip(1).Take(4), body => Assert.Contains("functionDeclarations", body, StringComparison.Ordinal));
+            Assert.DoesNotContain("functionDeclarations", handler.Bodies[5], StringComparison.Ordinal);
+            Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Bodies[5], StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_does_not_send_the_api_key_back_in_conversation_history()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: $"before {ApiKey} after")));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            await client.SendPromptAsync(Prompt);
+            await client.SendPromptAsync("Ask again.");
+
+            Assert.DoesNotContain(ApiKey, handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("before  after", handler.Bodies[1], StringComparison.Ordinal);
+        }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(2)]

@@ -35,6 +35,14 @@ try
                 break;
             }
 
+            if (input.Role.Equals("reset", StringComparison.OrdinalIgnoreCase))
+            {
+                client.ResetConversation();
+                Console.WriteLine("Conversation cleared.");
+                Console.WriteLine();
+                continue;
+            }
+
             var prompt = BuildPrompt(input);
             DisplayPrompt(prompt);
 
@@ -104,10 +112,21 @@ finally
 static PromptInput? ReadPromptFields(CancellationToken cancellationToken)
 {
     Console.WriteLine("Enter each field. A blank or whitespace-only value is not accepted.");
+    Console.WriteLine("Type reset as the Role to clear the conversation.");
     Console.WriteLine();
 
     var role = ReadRequiredField("Role", cancellationToken);
-    var task = role is null ? null : ReadRequiredField("Task", cancellationToken);
+    if (role is null)
+    {
+        return null;
+    }
+
+    if (role.Equals("reset", StringComparison.OrdinalIgnoreCase))
+    {
+        return new PromptInput("reset", string.Empty, string.Empty, string.Empty, string.Empty);
+    }
+
+    var task = ReadRequiredField("Task", cancellationToken);
     var context = task is null ? null : ReadRequiredField("Context", cancellationToken);
     var outputFormat = context is null ? null : ReadRequiredField("Output Format", cancellationToken);
     var constraints = outputFormat is null ? null : ReadRequiredField("Constraints", cancellationToken);

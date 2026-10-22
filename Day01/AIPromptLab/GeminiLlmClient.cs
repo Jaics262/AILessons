@@ -51,6 +51,7 @@ public sealed class GeminiLlmClient : IDisposable
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly string _apiKey;
+    private readonly InMemoryConversationHistory _history = new();
 
     public GeminiLlmClient()
         : this(httpClient: null)
@@ -92,7 +93,7 @@ public sealed class GeminiLlmClient : IDisposable
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-        var contents = new List<object>
+        var contents = new List<object>(_history.Messages)
         {
             new
             {
@@ -126,12 +127,12 @@ public sealed class GeminiLlmClient : IDisposable
                     var safeText = Redact(text);
                     if (TryDeserializeSummary(safeText, out var summary))
                     {
-                        return new GeminiPromptResult(summary, functionCalls, totals);
+                        return CompleteTurn(contents, apiResponse, functionCalls, totals, summary!);
                     }
 
                     if (formattingSummary || !allowTools)
                     {
-                        return new GeminiPromptResult(DeserializeSummary(safeText), functionCalls, totals);
+                        return CompleteTurn(contents, apiResponse, functionCalls, totals, DeserializeSummary(safeText));
                     }
 
                     Log.Warning("The model text was not a learning summary. Requesting the structured summary.");
@@ -200,6 +201,22 @@ public sealed class GeminiLlmClient : IDisposable
         }
     }
 
+    public void ResetConversation()
+    {
+        _history.Reset();
+    }
+
+    private GeminiPromptResult CompleteTurn(
+        List<object> contents,
+        GeminiApiResponse apiResponse,
+        IReadOnlyList<GeminiFunctionCall> functionCalls,
+        List<decimal> totals,
+        LearningSummary summary)
+    {
+        contents.Add(new { role = "model", parts = CreateModelTextParts(apiResponse) });
+        _history.Replace(contents);
+        return new GeminiPromptResult(summary, functionCalls, totals);
+    }
 
     private async Task<GeminiApiResponse> PostGenerateContentAsync(
         List<object> contents,
@@ -388,14 +405,15 @@ public sealed class GeminiLlmClient : IDisposable
         return new { functionCall, thoughtSignature = part.ThoughtSignature };
     }
 
-    private static object CreateTextPart(GeminiPart part)
+    private object CreateTextPart(GeminiPart part)
     {
+        var text = part.Text is null ? null : Redact(part.Text);
         if (string.IsNullOrEmpty(part.ThoughtSignature))
         {
-            return new { text = part.Text };
+            return new { text };
         }
 
-        return new { text = part.Text, thoughtSignature = part.ThoughtSignature };
+        return new { text, thoughtSignature = part.ThoughtSignature };
     }
 
     private static object CreateFunctionResponsePart(GeminiFunctionCall call, decimal total)
@@ -416,7 +434,7 @@ public sealed class GeminiLlmClient : IDisposable
         return new { functionResponse };
     }
 
-    private static List<object> CreateModelTextParts(GeminiApiResponse apiResponse)
+    private List<object> CreateModelTextParts(GeminiApiResponse apiResponse)
     {
         var modelParts = new List<object>();
         foreach (var part in apiResponse.ReadParts())
