@@ -35,12 +35,10 @@ public sealed class GeminiClientException : Exception
 
 public sealed class GeminiLlmClient : IDisposable
 {
-    private const string Model = "gemini-3.8-flash";
     private const string ApiKeyVariable = "GEMINI_API_KEY";
     private const string ApiKeyHeader = "x-goog-api-key";
     private const string CalculateTotalFunctionName = "calculate_total";
     private const string CalculateVatFunctionName = "calculate_vat";
-    private const int MaxFunctionRounds = 4;
 
     private static readonly JsonSerializerOptions ResponseJsonOptions = new()
     {
@@ -51,15 +49,95 @@ public sealed class GeminiLlmClient : IDisposable
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly string _apiKey;
-    private readonly InMemoryConversationHistory _history = new();
+    private readonly IConversationHistory _history;
+    private readonly RecentTurnContextSelector _contextSelector;
+    private readonly int _maxFunctionRounds;
+    private readonly string _model;
 
     public GeminiLlmClient()
-        : this(httpClient: null)
+        : this(httpClient: null, history: null)
     {
     }
 
     public GeminiLlmClient(HttpClient? httpClient)
+        : this(httpClient, history: null)
     {
+    }
+
+    public GeminiLlmClient(IConversationHistory history)
+        : this(httpClient: null, history)
+    {
+    }
+
+    public GeminiLlmClient(IConversationHistory history, int maxContextTurns)
+        : this(httpClient: null, history, maxContextTurns)
+    {
+    }
+
+    public GeminiLlmClient(IConversationHistory history, PromptLabSettings settings)
+        : this(
+            httpClient: null,
+            history,
+            settings.MaxContextTurns,
+            settings.MaxFunctionRounds,
+            settings.Model,
+            settings.RequestTimeout)
+    {
+    }
+
+    public GeminiLlmClient(HttpClient? httpClient, IConversationHistory? history)
+        : this(
+            httpClient,
+            history,
+            PromptLabSettings.DefaultMaxContextTurns,
+            PromptLabSettings.DefaultMaxFunctionRounds,
+            PromptLabSettings.DefaultModel,
+            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes))
+    {
+    }
+
+    public GeminiLlmClient(HttpClient? httpClient, IConversationHistory? history, int maxContextTurns)
+        : this(
+            httpClient,
+            history,
+            maxContextTurns,
+            PromptLabSettings.DefaultMaxFunctionRounds,
+            PromptLabSettings.DefaultModel,
+            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes))
+    {
+    }
+
+    public GeminiLlmClient(
+        HttpClient? httpClient,
+        IConversationHistory? history,
+        int maxContextTurns,
+        int maxFunctionRounds,
+        string model,
+        TimeSpan requestTimeout)
+    {
+        if (maxFunctionRounds < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxFunctionRounds),
+                "The maximum number of function rounds must be greater than zero.");
+        }
+
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            throw new ArgumentException("The model name cannot be empty.", nameof(model));
+        }
+
+        if (requestTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(requestTimeout),
+                "The request timeout must be greater than zero.");
+        }
+
+        _history = history ?? new InMemoryConversationHistory();
+        _contextSelector = new RecentTurnContextSelector(maxContextTurns);
+        _maxFunctionRounds = maxFunctionRounds;
+        _model = model;
         var apiKey = Environment.GetEnvironmentVariable(ApiKeyVariable);
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -73,7 +151,7 @@ public sealed class GeminiLlmClient : IDisposable
             _httpClient = new HttpClient
             {
                 BaseAddress = new Uri("https://generativelanguage.googleapis.com/"),
-                Timeout = TimeSpan.FromMinutes(5)
+                Timeout = requestTimeout
             };
             _ownsHttpClient = true;
         }
@@ -93,7 +171,8 @@ public sealed class GeminiLlmClient : IDisposable
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-        var contents = new List<object>(_history.Messages)
+        var context = _contextSelector.Select(_history.Messages);
+        var contents = new List<object>(context)
         {
             new
             {
@@ -101,15 +180,16 @@ public sealed class GeminiLlmClient : IDisposable
                 parts = new object[] { new { text = prompt } }
             }
         };
+        var contextCount = context.Count;
         var totals = new List<decimal>();
 
         try
         {
             var functionRounds = 0;
             var formattingSummary = false;
-            while (functionRounds <= MaxFunctionRounds)
+            while (functionRounds <= _maxFunctionRounds)
             {
-                var allowTools = functionRounds < MaxFunctionRounds && !formattingSummary;
+                var allowTools = functionRounds < _maxFunctionRounds && !formattingSummary;
                 var apiResponse = await PostGenerateContentAsync(
                     contents,
                     includeTools: allowTools,
@@ -127,12 +207,12 @@ public sealed class GeminiLlmClient : IDisposable
                     var safeText = Redact(text);
                     if (TryDeserializeSummary(safeText, out var summary))
                     {
-                        return CompleteTurn(contents, apiResponse, functionCalls, totals, summary!);
+                        return CompleteTurn(contents, contextCount, apiResponse, functionCalls, totals, summary!);
                     }
 
                     if (formattingSummary || !allowTools)
                     {
-                        return CompleteTurn(contents, apiResponse, functionCalls, totals, DeserializeSummary(safeText));
+                        return CompleteTurn(contents, contextCount, apiResponse, functionCalls, totals, DeserializeSummary(safeText));
                     }
 
                     Log.Warning("The model text was not a learning summary. Requesting the structured summary.");
@@ -142,7 +222,7 @@ public sealed class GeminiLlmClient : IDisposable
                         role = "user",
                         parts = new object[]
                         {
-                            new { text = "Format that answer as the learning summary JSON." }
+                            new { text = RecentTurnContextSelector.SummaryFormatInstruction }
                         }
                     });
                     formattingSummary = true;
@@ -151,7 +231,7 @@ public sealed class GeminiLlmClient : IDisposable
 
                 if (!allowTools)
                 {
-                    Log.Error("The model requested a function call after {MaxFunctionRounds} rounds.", MaxFunctionRounds);
+                    Log.Error("The model requested a function call after {MaxFunctionRounds} rounds.", _maxFunctionRounds);
                     throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
                 }
 
@@ -180,7 +260,7 @@ public sealed class GeminiLlmClient : IDisposable
                 functionRounds++;
             }
 
-            Log.Error("The model did not return a final answer after {MaxFunctionRounds} function rounds.", MaxFunctionRounds);
+            Log.Error("The model did not return a final answer after {MaxFunctionRounds} function rounds.", _maxFunctionRounds);
             throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
         }
         catch (GeminiClientException)
@@ -208,13 +288,14 @@ public sealed class GeminiLlmClient : IDisposable
 
     private GeminiPromptResult CompleteTurn(
         List<object> contents,
+        int contextCount,
         GeminiApiResponse apiResponse,
         IReadOnlyList<GeminiFunctionCall> functionCalls,
         List<decimal> totals,
         LearningSummary summary)
     {
         contents.Add(new { role = "model", parts = CreateModelTextParts(apiResponse) });
-        _history.Replace(contents);
+        _history.Replace(_history.Messages.Concat(contents.Skip(contextCount)));
         return new GeminiPromptResult(summary, functionCalls, totals);
     }
 
@@ -224,7 +305,7 @@ public sealed class GeminiLlmClient : IDisposable
         bool includeSchema,
         CancellationToken cancellationToken)
     {
-        var requestUri = $"v1beta/models/{Model}:generateContent";
+        var requestUri = $"v1beta/models/{_model}:generateContent";
         object body = includeSchema
             ? new { contents, generationConfig = LearningSummarySchema() }
             : includeTools

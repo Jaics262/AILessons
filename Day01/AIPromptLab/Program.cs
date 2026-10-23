@@ -1,4 +1,5 @@
-﻿using Serilog;
+﻿using System.Text.Json;
+using Serilog;
 using Serilog.Events;
 
 Log.Logger = new LoggerConfiguration()
@@ -23,7 +24,8 @@ Console.WriteLine();
 
 try
 {
-    using var client = new GeminiLlmClient();
+    var settings = ReadStartupSettings();
+    using var client = new GeminiLlmClient(settings.History, settings.Settings);
 
     while (!cancellation.IsCancellationRequested)
     {
@@ -91,6 +93,12 @@ try
         }
     }
 }
+catch (InvalidOperationException ex)
+{
+    Log.Error(ex, "Conversation history could not be created.");
+    Console.Error.WriteLine(ex.Message);
+    Environment.ExitCode = 1;
+}
 catch (GeminiClientException ex)
 {
     LogFailure(ex);
@@ -107,6 +115,31 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
+}
+
+static (IConversationHistory History, PromptLabSettings Settings) ReadStartupSettings()
+{
+    var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+    if (!File.Exists(path))
+    {
+        path = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+    }
+
+    if (!File.Exists(path))
+    {
+        throw new InvalidOperationException(
+            "appsettings.json was not found. Set ConversationHistory to InMemory.");
+    }
+
+    using var document = JsonDocument.Parse(File.ReadAllText(path));
+    if (!document.RootElement.TryGetProperty("ConversationHistory", out var provider))
+    {
+        throw new InvalidOperationException("appsettings.json is missing ConversationHistory.");
+    }
+
+    return (
+        ConversationHistoryFactory.Create(provider.GetString()),
+        PromptLabSettings.Read(document.RootElement));
 }
 
 static PromptInput? ReadPromptFields(CancellationToken cancellationToken)

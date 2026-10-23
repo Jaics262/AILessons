@@ -1,4 +1,4 @@
-public sealed class InMemoryConversationHistory
+public sealed class InMemoryConversationHistory : IConversationHistory
 {
     private readonly List<object> _messages = [];
 

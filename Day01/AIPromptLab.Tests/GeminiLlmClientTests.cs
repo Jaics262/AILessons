@@ -48,6 +48,25 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_stores_the_turn_in_the_injected_history()
+    {
+        var history = new InMemoryConversationHistory();
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "Stored in the injected history.")));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history))
+        {
+            await client.SendPromptAsync(Prompt);
+
+            Assert.NotEmpty(history.Messages);
+            client.ResetConversation();
+            Assert.Empty(history.Messages);
+        }
+    }
+
+    [Fact]
     public async Task SendPromptAsync_posts_the_prompt_and_returns_the_learning_summary()
     {
         var handler = new RecordingHandler(
@@ -484,6 +503,39 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_stops_after_the_configured_number_of_function_rounds()
+    {
+        const string functionCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":1,"unitPrice":1}},"thoughtSignature":"sig"}]}}]}
+            """;
+        var handler = new RecordingHandler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(functionCall, Encoding.UTF8, "application/json")
+        }));
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(
+            CreateHttpClient(handler),
+            history: null,
+            maxContextTurns: PromptLabSettings.DefaultMaxContextTurns,
+            maxFunctionRounds: 1,
+            model: "gemini-test",
+            requestTimeout: TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes)))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Contains("functionDeclarations", handler.Bodies[0], StringComparison.Ordinal);
+            Assert.DoesNotContain("functionDeclarations", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("\"responseMimeType\":\"application/json\"", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Equal(
+                "/v1beta/models/gemini-test:generateContent",
+                handler.Request!.RequestUri!.AbsolutePath);
+        }
+    }
+
+    [Fact]
     public async Task SendPromptAsync_sends_the_previous_turn_with_the_next_prompt()
     {
         var calls = 0;
@@ -697,6 +749,201 @@ public sealed class GeminiLlmClientTests
         }
     }
 
+    [Fact]
+    public async Task SendPromptAsync_sends_no_earlier_context_when_the_history_is_empty()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A first answer.")));
+        var history = new InMemoryConversationHistory();
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, maxContextTurns: 5))
+        {
+            await client.SendPromptAsync(Prompt);
+
+            Assert.DoesNotContain("\"role\":\"model\"", handler.Bodies[0], StringComparison.Ordinal);
+            Assert.Contains(Prompt, handler.Bodies[0], StringComparison.Ordinal);
+            Assert.Equal(2, history.Messages.Count);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_sends_both_turns_when_two_stored_turns_are_within_a_limit_of_five()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, maxContextTurns: 5))
+        {
+            await client.SendPromptAsync("Question 1.");
+            await client.SendPromptAsync("Question 2.");
+            await client.SendPromptAsync("Question 3.");
+
+            Assert.Contains("Question 1.", handler.Bodies[2], StringComparison.Ordinal);
+            Assert.Contains("Question 2.", handler.Bodies[2], StringComparison.Ordinal);
+            Assert.Contains("Question 3.", handler.Bodies[2], StringComparison.Ordinal);
+            AssertChronological(handler.Bodies[2], "Question 1.", "Question 2.", "Question 3.");
+            Assert.Equal(6, history.Messages.Count);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_sends_only_the_latest_five_of_eight_stored_turns()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, maxContextTurns: 5))
+        {
+            for (var number = 1; number <= 8; number++)
+            {
+                await client.SendPromptAsync($"Question {number}.");
+            }
+
+            var firstStoredQuestion = history.Messages[0];
+            await client.SendPromptAsync("Question 9.");
+
+            var request = handler.Bodies[8];
+            Assert.DoesNotContain("Question 1.", request, StringComparison.Ordinal);
+            Assert.DoesNotContain("Question 2.", request, StringComparison.Ordinal);
+            Assert.DoesNotContain("Question 3.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 4.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 5.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 6.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 7.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 8.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 9.", request, StringComparison.Ordinal);
+            AssertChronological(
+                request,
+                "Question 4.",
+                "Question 5.",
+                "Question 6.",
+                "Question 7.",
+                "Question 8.",
+                "Question 9.");
+            Assert.Equal(18, history.Messages.Count);
+            Assert.Same(firstStoredQuestion, history.Messages[0]);
+            Assert.Contains("Question 1.", JsonText(history.Messages[0]), StringComparison.Ordinal);
+            Assert.Contains("Question 9.", JsonText(history.Messages[16]), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task ResetConversation_clears_turns_outside_the_active_window()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, maxContextTurns: 5))
+        {
+            for (var number = 1; number <= 8; number++)
+            {
+                await client.SendPromptAsync($"Question {number}.");
+            }
+
+            client.ResetConversation();
+
+            Assert.Empty(history.Messages);
+            await client.SendPromptAsync("Question after reset.");
+
+            Assert.DoesNotContain("Question 1.", handler.Bodies[8], StringComparison.Ordinal);
+            Assert.DoesNotContain("Question 8.", handler.Bodies[8], StringComparison.Ordinal);
+            Assert.DoesNotContain("\"role\":\"model\"", handler.Bodies[8], StringComparison.Ordinal);
+            Assert.Contains("Question after reset.", handler.Bodies[8], StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_uses_the_recent_turn_window_without_dropping_stored_history()
+    {
+        var calls = 0;
+        var toolCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"calculate_total","args":{"quantity":2,"unitPrice":9.5}},"thoughtSignature":"sig-abc"}]}}]}
+            """;
+        var firstSummary = SuccessJson(LearningSummaryJson(summary: "The first answer."));
+        var notebookSummary = SuccessJson(LearningSummaryJson(summary: "The notebook total is 19.0"));
+        var gravitySummary = SuccessJson(LearningSummaryJson(summary: "Gravity is a pull."));
+        var thirdSummary = SuccessJson(LearningSummaryJson(summary: "The third answer."));
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls switch
+            {
+                0 => firstSummary,
+                1 => toolCall,
+                2 => notebookSummary,
+                3 => gravitySummary,
+                _ => thirdSummary
+            };
+            calls++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+        var history = new InMemoryConversationHistory();
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, maxContextTurns: 2))
+        {
+            await client.SendPromptAsync("First question.");
+            await client.SendPromptAsync("Calculate the notebook total.");
+            var functionCallMessage = history.Messages[3];
+            await client.SendPromptAsync("What is gravity?");
+
+            var gravityRequest = handler.Bodies[3];
+            Assert.Contains("First question.", gravityRequest, StringComparison.Ordinal);
+            Assert.Contains("The first answer.", gravityRequest, StringComparison.Ordinal);
+            Assert.Contains("Calculate the notebook total.", gravityRequest, StringComparison.Ordinal);
+            Assert.Contains("\"id\":\"c1\"", gravityRequest, StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-abc\"", gravityRequest, StringComparison.Ordinal);
+            Assert.Contains("\"functionResponse\"", gravityRequest, StringComparison.Ordinal);
+            Assert.Contains("\"total\":19.0", gravityRequest, StringComparison.Ordinal);
+            AssertChronological(
+                gravityRequest,
+                "First question.",
+                "\"thoughtSignature\":\"sig-abc\"",
+                "\"functionResponse\"",
+                "What is gravity?");
+
+            await client.SendPromptAsync("A third question.");
+
+            var thirdRequest = handler.Bodies[4];
+            Assert.DoesNotContain("First question.", thirdRequest, StringComparison.Ordinal);
+            Assert.DoesNotContain("The first answer.", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("Calculate the notebook total.", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("\"id\":\"c1\"", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("\"thoughtSignature\":\"sig-abc\"", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("\"functionResponse\"", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("\"total\":19.0", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("What is gravity?", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("Gravity is a pull.", thirdRequest, StringComparison.Ordinal);
+            Assert.Contains("A third question.", thirdRequest, StringComparison.Ordinal);
+            AssertChronological(
+                thirdRequest,
+                "Calculate the notebook total.",
+                "\"id\":\"c1\"",
+                "\"thoughtSignature\":\"sig-abc\"",
+                "\"functionResponse\"",
+                "What is gravity?",
+                "A third question.");
+
+            Assert.Equal(10, history.Messages.Count);
+            Assert.Same(functionCallMessage, history.Messages[3]);
+            Assert.Contains("First question.", JsonText(history.Messages[0]), StringComparison.Ordinal);
+            Assert.Contains("A third question.", JsonText(history.Messages[8]), StringComparison.Ordinal);
+        }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
@@ -817,6 +1064,22 @@ public sealed class GeminiLlmClientTests
         }
     }
 
+    private static void AssertChronological(string body, params string[] tokens)
+    {
+        var previous = -1;
+        foreach (var token in tokens)
+        {
+            var index = body.IndexOf(token, StringComparison.Ordinal);
+            Assert.True(index > previous, $"Expected '{token}' after the preceding token.");
+            previous = index;
+        }
+    }
+
+    private static string JsonText(object message)
+    {
+        return System.Text.Json.JsonSerializer.Serialize(message);
+    }
+
     private static async Task AssertFailure(HttpStatusCode statusCode, string body, GeminiClientError expected)
     {
         var handler = new RecordingHandler(statusCode, body);
@@ -834,12 +1097,15 @@ public sealed class GeminiLlmClientTests
 
     private static GeminiLlmClient CreateClient(HttpMessageHandler handler)
     {
-        var httpClient = new HttpClient(handler)
+        return new GeminiLlmClient(CreateHttpClient(handler));
+    }
+
+    private static HttpClient CreateHttpClient(HttpMessageHandler handler)
+    {
+        return new HttpClient(handler)
         {
             BaseAddress = new Uri("https://generativelanguage.googleapis.com/")
         };
-
-        return new GeminiLlmClient(httpClient);
     }
 
     private static void AssertSummaryDoesNotContainApiKey(LearningSummary summary)
