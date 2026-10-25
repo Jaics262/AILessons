@@ -14,19 +14,21 @@ public sealed class HttpRetryPolicy
     public static readonly TimeSpan InitialDelay = TimeSpan.FromMilliseconds(200);
 
     private readonly IHttpRetryDelay _delay;
+    private readonly Func<DateTimeOffset> _utcNow;
 
     public HttpRetryPolicy()
         : this(new TaskHttpRetryDelay())
     {
     }
 
-    public HttpRetryPolicy(IHttpRetryDelay delay)
+    public HttpRetryPolicy(IHttpRetryDelay delay, Func<DateTimeOffset>? utcNow = null)
     {
         ArgumentNullException.ThrowIfNull(delay);
         _delay = delay;
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
-    public static TimeSpan GetDelay(int retryNumber)
+    public static TimeSpan GetDelay(int retryNumber, TimeSpan? retryAfter = null)
     {
         if (retryNumber < 1)
         {
@@ -35,7 +37,13 @@ public sealed class HttpRetryPolicy
                 "The retry number must be greater than zero.");
         }
 
-        return InitialDelay * (1 << (retryNumber - 1));
+        var backoff = InitialDelay * (1 << (retryNumber - 1));
+        if (retryAfter is { } requested && requested > backoff)
+        {
+            return requested;
+        }
+
+        return backoff;
     }
 
     public async Task<HttpRetryResult> SendAsync(
@@ -47,6 +55,7 @@ public sealed class HttpRetryPolicy
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            TimeSpan? retryAfter = null;
             try
             {
                 using var response = await send(cancellationToken);
@@ -57,6 +66,8 @@ public sealed class HttpRetryPolicy
                 {
                     return new HttpRetryResult(response.StatusCode, responseBody);
                 }
+
+                retryAfter = ReadRetryAfter(response);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -66,7 +77,7 @@ public sealed class HttpRetryPolicy
             {
             }
 
-            await _delay.WaitAsync(GetDelay(attempt), cancellationToken);
+            await _delay.WaitAsync(GetDelay(attempt, retryAfter), cancellationToken);
         }
 
         throw new InvalidOperationException("The HTTP retry loop ended without a response.");
@@ -76,6 +87,22 @@ public sealed class HttpRetryPolicy
     {
         var status = (int)statusCode;
         return statusCode == HttpStatusCode.TooManyRequests || status is >= 500 and <= 599;
+    }
+
+    private TimeSpan? ReadRetryAfter(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Delta is TimeSpan delta)
+        {
+            return delta;
+        }
+
+        if (retryAfter?.Date is DateTimeOffset date)
+        {
+            return date - _utcNow();
+        }
+
+        return null;
     }
 
     private static bool IsTransientNetworkFailure(Exception exception)
