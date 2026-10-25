@@ -53,6 +53,7 @@ public sealed class GeminiLlmClient : IDisposable
     private readonly RecentTurnContextSelector _contextSelector;
     private readonly int _maxFunctionRounds;
     private readonly string _model;
+    private readonly HttpRetryPolicy _retryPolicy;
 
     public GeminiLlmClient()
         : this(httpClient: null, history: null)
@@ -61,6 +62,18 @@ public sealed class GeminiLlmClient : IDisposable
 
     public GeminiLlmClient(HttpClient? httpClient)
         : this(httpClient, history: null)
+    {
+    }
+
+    public GeminiLlmClient(HttpClient? httpClient, HttpRetryPolicy retryPolicy)
+        : this(
+            httpClient,
+            history: null,
+            PromptLabSettings.DefaultMaxContextTurns,
+            PromptLabSettings.DefaultMaxFunctionRounds,
+            PromptLabSettings.DefaultModel,
+            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes),
+            retryPolicy)
     {
     }
 
@@ -82,6 +95,24 @@ public sealed class GeminiLlmClient : IDisposable
             settings.MaxFunctionRounds,
             settings.Model,
             settings.RequestTimeout)
+    {
+    }
+
+    public GeminiLlmClient(
+        IConversationHistory history,
+        PromptLabSettings settings,
+        string? apiKey,
+        HttpRetryPolicy retryPolicy)
+        : this(
+            httpClient: null,
+            history,
+            settings.MaxContextTurns,
+            settings.MaxFunctionRounds,
+            settings.Model,
+            settings.RequestTimeout,
+            retryPolicy,
+            apiKey,
+            useEnvironmentForApiKey: false)
     {
     }
 
@@ -113,7 +144,10 @@ public sealed class GeminiLlmClient : IDisposable
         int maxContextTurns,
         int maxFunctionRounds,
         string model,
-        TimeSpan requestTimeout)
+        TimeSpan requestTimeout,
+        HttpRetryPolicy? retryPolicy = null,
+        string? apiKey = null,
+        bool useEnvironmentForApiKey = true)
     {
         if (maxFunctionRounds < 1)
         {
@@ -138,13 +172,8 @@ public sealed class GeminiLlmClient : IDisposable
         _contextSelector = new RecentTurnContextSelector(maxContextTurns);
         _maxFunctionRounds = maxFunctionRounds;
         _model = model;
-        var apiKey = Environment.GetEnvironmentVariable(ApiKeyVariable);
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new GeminiClientException(GeminiClientError.MissingApiKey);
-        }
-
-        _apiKey = apiKey;
+        _retryPolicy = retryPolicy ?? new HttpRetryPolicy();
+        _apiKey = ResolveApiKey(apiKey, useEnvironmentForApiKey);
 
         if (httpClient is null)
         {
@@ -162,6 +191,21 @@ public sealed class GeminiLlmClient : IDisposable
 
         _httpClient.DefaultRequestHeaders.Remove(ApiKeyHeader);
         _httpClient.DefaultRequestHeaders.Add(ApiKeyHeader, _apiKey);
+    }
+
+    private static string ResolveApiKey(string? apiKey, bool useEnvironmentForApiKey)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey) && useEnvironmentForApiKey)
+        {
+            apiKey = Environment.GetEnvironmentVariable(ApiKeyVariable);
+        }
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            throw new GeminiClientException(GeminiClientError.MissingApiKey);
+        }
+
+        return apiKey;
     }
 
     public async Task<GeminiPromptResult> SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
@@ -312,16 +356,17 @@ public sealed class GeminiLlmClient : IDisposable
                 ? new { contents, tools = CalculateTotalTools() }
                 : new { contents };
 
-        using var response = await _httpClient.PostAsJsonAsync(requestUri, body, cancellationToken);
-        var raw = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        var result = await _retryPolicy.SendAsync(
+            token => _httpClient.PostAsJsonAsync(requestUri, body, token),
+            cancellationToken);
+        if ((int)result.StatusCode is < 200 or > 299)
         {
-            var detail = Redact(raw.Length <= 800 ? raw : raw[..800]);
-            Log.Error("Gemini returned HTTP {StatusCode}: {Body}", (int)response.StatusCode, detail);
-            throw new GeminiClientException(ClassifyFailure(response.StatusCode, raw));
+            var detail = Redact(result.Body.Length <= 800 ? result.Body : result.Body[..800]);
+            Log.Error("Gemini returned HTTP {StatusCode}: {Body}", (int)result.StatusCode, detail);
+            throw new GeminiClientException(ClassifyFailure(result.StatusCode, result.Body));
         }
 
-        return JsonSerializer.Deserialize<GeminiApiResponse>(raw, ResponseJsonOptions)
+        return JsonSerializer.Deserialize<GeminiApiResponse>(result.Body, ResponseJsonOptions)
             ?? throw new GeminiClientException(GeminiClientError.EmptyResponse);
     }
 

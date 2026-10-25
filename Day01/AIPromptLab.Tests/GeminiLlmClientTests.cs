@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 
@@ -1064,6 +1065,202 @@ public sealed class GeminiLlmClientTests
         }
     }
 
+    [Fact]
+    public async Task SendPromptAsync_retries_http_429_and_then_returns_the_summary()
+    {
+        var calls = 0;
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(_ =>
+        {
+            var status = calls++ == 0 ? HttpStatusCode.TooManyRequests : HttpStatusCode.OK;
+            var body = status == HttpStatusCode.OK ? SuccessJson(LearningSummaryJson(summary: "Retried")) : "{}";
+            return Task.FromResult(JsonResponse(status, body));
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var started = Stopwatch.StartNew();
+            var response = await client.SendPromptAsync(Prompt);
+            started.Stop();
+
+            Assert.Equal("Retried", response.Summary!.Summary);
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Equal([HttpRetryPolicy.InitialDelay], delay.Delays);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task SendPromptAsync_retries_http_5xx_with_exponential_backoff(HttpStatusCode statusCode)
+    {
+        var calls = 0;
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(_ =>
+        {
+            var status = calls++ < 2 ? statusCode : HttpStatusCode.OK;
+            var body = status == HttpStatusCode.OK ? SuccessJson(LearningSummaryJson()) : """{"error":{"status":"INTERNAL"}}""";
+            return Task.FromResult(JsonResponse(status, body));
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var started = Stopwatch.StartNew();
+            var response = await client.SendPromptAsync(Prompt);
+            started.Stop();
+
+            Assert.NotNull(response.Summary);
+            Assert.Equal(3, handler.Bodies.Count);
+            Assert.Equal([HttpRetryPolicy.InitialDelay, HttpRetryPolicy.InitialDelay * 2], delay.Delays);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_stops_after_two_retries_and_keeps_the_original_error()
+    {
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(HttpStatusCode.InternalServerError, """{"error":{"status":"INTERNAL"}}""");
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.ServerRejection, exception.Error);
+            Assert.Equal(HttpRetryPolicy.MaxRetries + 1, handler.Bodies.Count);
+            Assert.Equal([HttpRetryPolicy.InitialDelay, HttpRetryPolicy.InitialDelay * 2], delay.Delays);
+        }
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest, GeminiClientError.ServerRejection)]
+    [InlineData(HttpStatusCode.Unauthorized, GeminiClientError.InvalidApiKey)]
+    [InlineData(HttpStatusCode.Forbidden, GeminiClientError.InvalidApiKey)]
+    public async Task SendPromptAsync_does_not_retry_ordinary_400_401_or_403(HttpStatusCode statusCode, GeminiClientError expected)
+    {
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(statusCode, "{}");
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(expected, exception.Error);
+            Assert.Single(handler.Bodies);
+            Assert.Empty(delay.Delays);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_retries_a_transient_connection_failure()
+    {
+        var calls = 0;
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(_ =>
+        {
+            if (calls++ == 0)
+            {
+                throw new HttpRequestException("Could not connect.");
+            }
+
+            return Task.FromResult(JsonResponse(HttpStatusCode.OK, SuccessJson(LearningSummaryJson(summary: "Connected"))));
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var response = await client.SendPromptAsync(Prompt);
+
+            Assert.Equal("Connected", response.Summary!.Summary);
+            Assert.Equal(2, handler.Bodies.Count);
+            Assert.Equal([HttpRetryPolicy.InitialDelay], delay.Delays);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_retries_a_request_timeout_without_waiting_in_the_test()
+    {
+        var calls = 0;
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(_ =>
+        {
+            if (calls++ == 0)
+            {
+                throw new TaskCanceledException("The request timed out.");
+            }
+
+            return Task.FromResult(JsonResponse(HttpStatusCode.OK, SuccessJson(LearningSummaryJson())));
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var started = Stopwatch.StartNew();
+            var response = await client.SendPromptAsync(Prompt);
+            started.Stop();
+
+            Assert.NotNull(response.Summary);
+            Assert.Equal([HttpRetryPolicy.InitialDelay], delay.Delays);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_does_not_retry_after_the_caller_cancels()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var delay = new RecordingRetryDelay();
+        var handler = new RecordingHandler(_ => throw new TaskCanceledException());
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                client.SendPromptAsync(Prompt, cancellation.Token));
+
+            Assert.Empty(delay.Delays);
+            Assert.True(handler.Bodies.Count <= 1);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_keeps_http_retries_separate_from_the_four_function_rounds()
+    {
+        var calls = 0;
+        var delay = new RecordingRetryDelay();
+        const string functionCall = """
+            {"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate_total","args":{"quantity":1,"unitPrice":1}},"thoughtSignature":"sig"}]}}]}
+            """;
+        var handler = new RecordingHandler(_ =>
+        {
+            var body = calls++ == 0
+                ? """{"error":{"status":"UNAVAILABLE"}}"""
+                : functionCall;
+            var status = calls == 1 ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK;
+            return Task.FromResult(JsonResponse(status, body));
+        });
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateRetryClient(handler, delay))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.InvalidFunctionCall, exception.Error);
+            Assert.Equal(6, handler.Bodies.Count);
+            Assert.Equal([HttpRetryPolicy.InitialDelay], delay.Delays);
+            Assert.Equal(5, handler.Bodies.Count(body => body.Contains("functionDeclarations", StringComparison.Ordinal)));
+            Assert.DoesNotContain("functionDeclarations", handler.Bodies[5], StringComparison.Ordinal);
+            Assert.Equal(4, CountOccurrences(handler.Bodies[5], "\"functionResponse\""));
+        }
+    }
+
     private static void AssertChronological(string body, params string[] tokens)
     {
         var previous = -1;
@@ -1095,9 +1292,22 @@ public sealed class GeminiLlmClientTests
         }
     }
 
+    private static HttpResponseMessage JsonResponse(HttpStatusCode statusCode, string body)
+    {
+        return new HttpResponseMessage(statusCode)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+    }
+
     private static GeminiLlmClient CreateClient(HttpMessageHandler handler)
     {
-        return new GeminiLlmClient(CreateHttpClient(handler));
+        return new GeminiLlmClient(CreateHttpClient(handler), new HttpRetryPolicy(new ImmediateRetryDelay()));
+    }
+
+    private static GeminiLlmClient CreateRetryClient(HttpMessageHandler handler, RecordingRetryDelay delay)
+    {
+        return new GeminiLlmClient(CreateHttpClient(handler), new HttpRetryPolicy(delay));
     }
 
     private static HttpClient CreateHttpClient(HttpMessageHandler handler)
@@ -1171,6 +1381,27 @@ public sealed class GeminiLlmClientTests
         {
             Environment.SetEnvironmentVariable(ApiKeyVariable, _previous);
             Gate.Release();
+        }
+    }
+
+    private sealed class ImmediateRetryDelay : IHttpRetryDelay
+    {
+        public Task WaitAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingRetryDelay : IHttpRetryDelay
+    {
+        public List<TimeSpan> Delays { get; } = [];
+
+        public Task WaitAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Delays.Add(delay);
+            return Task.CompletedTask;
         }
     }
 

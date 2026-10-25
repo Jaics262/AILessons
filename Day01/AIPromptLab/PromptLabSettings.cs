@@ -1,4 +1,5 @@
-using System.Text.Json;
+using System.Globalization;
+using Microsoft.Extensions.Configuration;
 
 public sealed class PromptLabSettings
 {
@@ -49,26 +50,26 @@ public sealed class PromptLabSettings
 
     public TimeSpan RequestTimeout { get; }
 
-    public static PromptLabSettings Read(JsonElement settings)
+    public static PromptLabSettings Read(IConfiguration configuration)
     {
-        var timeoutMinutes = ReadPositiveInt(settings, "RequestTimeoutMinutes", DefaultRequestTimeoutMinutes);
+        ArgumentNullException.ThrowIfNull(configuration);
+
         return new PromptLabSettings(
-            ReadPositiveInt(settings, "MaxContextTurns", DefaultMaxContextTurns),
-            ReadPositiveInt(settings, "MaxFunctionRounds", DefaultMaxFunctionRounds),
-            ReadText(settings, "Model", DefaultModel),
-            TimeSpan.FromMinutes(timeoutMinutes));
+            ReadPositiveInt(configuration, "MaxContextTurns", DefaultMaxContextTurns),
+            ReadPositiveInt(configuration, "MaxFunctionRounds", DefaultMaxFunctionRounds),
+            ReadText(configuration, "Model", DefaultModel),
+            TimeSpan.FromMinutes(ReadPositiveInt(configuration, "RequestTimeoutMinutes", DefaultRequestTimeoutMinutes)));
     }
 
-    private static int ReadPositiveInt(JsonElement settings, string name, int fallback)
+    private static int ReadPositiveInt(IConfiguration configuration, string name, int fallback)
     {
-        if (!settings.TryGetProperty(name, out var value))
+        var value = configuration[name];
+        if (value is null)
         {
             return fallback;
         }
 
-        if (value.ValueKind != JsonValueKind.Number ||
-            !value.TryGetInt32(out var number) ||
-            number < 1)
+        if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) || number < 1)
         {
             throw new InvalidOperationException($"{name} must be a whole number greater than zero.");
         }
@@ -76,18 +77,19 @@ public sealed class PromptLabSettings
         return number;
     }
 
-    private static string ReadText(JsonElement settings, string name, string fallback)
+    private static string ReadText(IConfiguration configuration, string name, string fallback)
     {
-        if (!settings.TryGetProperty(name, out var value))
+        var value = configuration[name];
+        if (value is null)
         {
             return fallback;
         }
 
-        if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
+        if (string.IsNullOrWhiteSpace(value))
         {
             throw new InvalidOperationException($"{name} must be a non-blank string.");
         }
 
-        return value.GetString()!;
+        return value;
     }
 }
