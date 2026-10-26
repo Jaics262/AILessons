@@ -43,7 +43,7 @@ catch (GeminiClientException ex)
 {
     PromptLabErrors.LogFailure(ex);
     Console.Error.WriteLine();
-    Console.Error.WriteLine(PromptLabErrors.Describe(ex.Error));
+    Console.Error.WriteLine(PromptLabErrors.Describe(ex));
     Environment.ExitCode = 1;
 }
 catch (Exception ex)

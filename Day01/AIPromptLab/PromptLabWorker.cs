@@ -61,7 +61,7 @@ public sealed class PromptLabWorker : BackgroundService
                 }
 
                 Console.Error.WriteLine();
-                Console.Error.WriteLine(ex.Detail ?? PromptLabErrors.Describe(ex.Error));
+                Console.Error.WriteLine(ex.Detail ?? PromptLabErrors.Describe(ex));
                 Console.Error.WriteLine();
             }
             catch (IOException ex)

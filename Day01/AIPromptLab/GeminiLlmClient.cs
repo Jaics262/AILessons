@@ -9,6 +9,7 @@ public enum GeminiClientError
     InvalidApiKey,
     NetworkFailure,
     RateLimitExceeded,
+    RequestTimeout,
     ServerRejection,
     EmptyResponse,
     InvalidResponse,
@@ -29,6 +30,8 @@ public sealed class GeminiClientException : Exception
     }
 
     public GeminiClientError Error { get; }
+
+    public HttpStatusCode? StatusCode { get; init; }
 
     public string? Detail { get; init; }
 }
@@ -275,7 +278,10 @@ public sealed class GeminiLlmClient : IDisposable
 
                 if (!allowTools)
                 {
-                    Log.Error("The model requested a function call after {MaxFunctionRounds} rounds.", _maxFunctionRounds);
+                    Log.Error(
+                        "Gemini request failed. {Error} {MaxFunctionRounds}",
+                        GeminiClientError.InvalidFunctionCall,
+                        _maxFunctionRounds);
                     throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
                 }
 
@@ -304,20 +310,23 @@ public sealed class GeminiLlmClient : IDisposable
                 functionRounds++;
             }
 
-            Log.Error("The model did not return a final answer after {MaxFunctionRounds} function rounds.", _maxFunctionRounds);
+            Log.Error(
+                "Gemini request failed. {Error} {MaxFunctionRounds}",
+                GeminiClientError.InvalidFunctionCall,
+                _maxFunctionRounds);
             throw new GeminiClientException(GeminiClientError.InvalidFunctionCall);
         }
         catch (GeminiClientException)
         {
             throw;
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException ex)
         {
-            throw new GeminiClientException(GeminiClientError.NetworkFailure);
+            throw new GeminiClientException(GeminiClientError.NetworkFailure, ex);
         }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new GeminiClientException(GeminiClientError.NetworkFailure);
+            throw new GeminiClientException(GeminiClientError.RequestTimeout, ex);
         }
         catch (JsonException ex)
         {
@@ -361,9 +370,11 @@ public sealed class GeminiLlmClient : IDisposable
             cancellationToken);
         if ((int)result.StatusCode is < 200 or > 299)
         {
-            var detail = Redact(result.Body.Length <= 800 ? result.Body : result.Body[..800]);
-            Log.Error("Gemini returned HTTP {StatusCode}: {Body}", (int)result.StatusCode, detail);
-            throw new GeminiClientException(ClassifyFailure(result.StatusCode, result.Body));
+            var error = ClassifyFailure(result.StatusCode, result.Body);
+            throw new GeminiClientException(error)
+            {
+                StatusCode = result.StatusCode
+            };
         }
 
         return JsonSerializer.Deserialize<GeminiApiResponse>(result.Body, ResponseJsonOptions)
@@ -461,7 +472,10 @@ public sealed class GeminiLlmClient : IDisposable
         }
         catch (ArgumentException ex)
         {
-            Log.Error(ex, "The function call was rejected.");
+            Log.Error(
+                "Gemini request failed. {Error} {ExceptionType}",
+                GeminiClientError.InvalidFunctionCall,
+                ex.GetType().Name);
             throw new GeminiClientException(GeminiClientError.InvalidFunctionCall, ex);
         }
     }
@@ -619,7 +633,10 @@ public sealed class GeminiLlmClient : IDisposable
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException)
         {
-            Log.Error(ex, "The API response could not be deserialized to a learning summary.");
+            Log.Error(
+                "Gemini request failed. {Error} {ExceptionType}",
+                GeminiClientError.InvalidResponse,
+                ex.GetType().Name);
             throw new GeminiClientException(GeminiClientError.InvalidResponse, ex);
         }
     }

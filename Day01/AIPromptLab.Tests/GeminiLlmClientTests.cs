@@ -1036,7 +1036,7 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
-    public async Task SendPromptAsync_classifies_a_client_timeout_as_a_network_failure()
+    public async Task SendPromptAsync_classifies_a_client_timeout_separately_from_caller_cancellation()
     {
         var handler = new RecordingHandler(_ => throw new TaskCanceledException("The request timed out."));
 
@@ -1045,8 +1045,28 @@ public sealed class GeminiLlmClientTests
         {
             var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
 
-            Assert.Equal(GeminiClientError.NetworkFailure, exception.Error);
+            Assert.Equal(GeminiClientError.RequestTimeout, exception.Error);
             Assert.DoesNotContain(ApiKey, exception.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(Prompt, exception.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_http_failure_does_not_carry_the_response_body_or_prompt()
+    {
+        var body = "{\"error\":{\"message\":\"rejected " + ApiKey + " and " + Prompt + "\"}}";
+        var handler = new RecordingHandler(HttpStatusCode.InternalServerError, body);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = CreateClient(handler))
+        {
+            var exception = await Assert.ThrowsAsync<GeminiClientException>(() => client.SendPromptAsync(Prompt));
+
+            Assert.Equal(GeminiClientError.ServerRejection, exception.Error);
+            Assert.Equal(HttpStatusCode.InternalServerError, exception.StatusCode);
+            Assert.DoesNotContain(ApiKey, exception.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(Prompt, exception.ToString(), StringComparison.Ordinal);
+            Assert.Null(exception.Detail);
         }
     }
 
