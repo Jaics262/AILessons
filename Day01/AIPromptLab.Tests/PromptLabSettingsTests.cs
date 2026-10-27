@@ -10,11 +10,13 @@ public sealed class PromptLabSettingsTests
         var settings = PromptLabSettings.Read(Configuration(
             ("ConversationHistory", "InMemory"),
             ("MaxContextTurns", "5"),
+            ("MaxHistoryTokens", "1200"),
             ("MaxFunctionRounds", "2"),
             ("Model", "gemini-test"),
             ("RequestTimeoutMinutes", "3")));
 
         Assert.Equal(5, settings.MaxContextTurns);
+        Assert.Equal(1200, settings.MaxHistoryTokens);
         Assert.Equal(2, settings.MaxFunctionRounds);
         Assert.Equal("gemini-test", settings.Model);
         Assert.Equal(TimeSpan.FromMinutes(3), settings.RequestTimeout);
@@ -26,6 +28,8 @@ public sealed class PromptLabSettingsTests
         var settings = PromptLabSettings.Read(Configuration(("ConversationHistory", "InMemory")));
 
         Assert.Equal(PromptLabSettings.DefaultMaxContextTurns, settings.MaxContextTurns);
+        Assert.Equal(PromptLabSettings.DefaultMaxHistoryTokens, settings.MaxHistoryTokens);
+        Assert.Equal(4000, settings.MaxHistoryTokens);
         Assert.Equal(PromptLabSettings.DefaultMaxFunctionRounds, settings.MaxFunctionRounds);
         Assert.Equal(PromptLabSettings.DefaultModel, settings.Model);
         Assert.Equal(TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes), settings.RequestTimeout);
@@ -57,6 +61,10 @@ public sealed class PromptLabSettingsTests
     [InlineData("MaxContextTurns", "-1")]
     [InlineData("MaxContextTurns", "1.5")]
     [InlineData("MaxContextTurns", "six")]
+    [InlineData("MaxHistoryTokens", "0")]
+    [InlineData("MaxHistoryTokens", "-1")]
+    [InlineData("MaxHistoryTokens", "1.5")]
+    [InlineData("MaxHistoryTokens", "four thousand")]
     [InlineData("MaxFunctionRounds", "0")]
     [InlineData("MaxFunctionRounds", "4.2")]
     [InlineData("RequestTimeoutMinutes", "0")]

@@ -11,6 +11,7 @@ public sealed class PromptLabServicesTests
         using var provider = BuildProvider(
             ("ConversationHistory", "InMemory"),
             ("MaxContextTurns", "5"),
+            ("MaxHistoryTokens", "1200"),
             ("MaxFunctionRounds", "2"),
             ("Model", "gemini-test"),
             ("RequestTimeoutMinutes", "3"),
@@ -21,6 +22,7 @@ public sealed class PromptLabServicesTests
         var client = provider.GetRequiredService<GeminiLlmClient>();
 
         Assert.Equal(5, settings.MaxContextTurns);
+        Assert.Equal(1200, settings.MaxHistoryTokens);
         Assert.Equal(2, settings.MaxFunctionRounds);
         Assert.Equal("gemini-test", settings.Model);
         Assert.IsType<InMemoryConversationHistory>(history);

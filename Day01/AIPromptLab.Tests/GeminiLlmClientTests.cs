@@ -837,6 +837,44 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_keeps_the_newest_turn_and_omits_an_earlier_turn_over_the_token_budget()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+        var http = CreateHttpClient(handler);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(http, history, maxContextTurns: 5))
+        {
+            await client.SendPromptAsync("Question 1.");
+            await client.SendPromptAsync("Question 2.");
+        }
+
+        var newestTurnTokens = RecentTurnContextSelector.EstimateTokens(history.Messages[2])
+            + RecentTurnContextSelector.EstimateTokens(history.Messages[3]);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(
+            new HttpClient(handler, disposeHandler: false) { BaseAddress = http.BaseAddress },
+            history,
+            maxContextTurns: 5,
+            maxHistoryTokens: newestTurnTokens))
+        {
+            await client.SendPromptAsync("Question 3.");
+
+            var request = handler.Bodies[2];
+            Assert.DoesNotContain("Question 1.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 2.", request, StringComparison.Ordinal);
+            Assert.Contains("Question 3.", request, StringComparison.Ordinal);
+            AssertChronological(request, "Question 2.", "Question 3.");
+            Assert.Equal(6, history.Messages.Count);
+            Assert.Contains("Question 1.", JsonText(history.Messages[0]), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task ResetConversation_clears_turns_outside_the_active_window()
     {
         var handler = new RecordingHandler(

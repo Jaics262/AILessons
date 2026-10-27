@@ -156,6 +156,144 @@ public sealed class RecentTurnContextSelectorTests
         Assert.Equal("messages", exception.ParamName);
     }
 
+    [Fact]
+    public void Select_keeps_recent_complete_turns_within_both_limits()
+    {
+        var messages = new List<object>();
+        AddPlainTurn(messages, "turn-1");
+        AddPlainTurn(messages, "turn-2");
+        AddToolTurn(messages, "turn-3", "c-3", "sig-3");
+        AddPlainTurn(messages, "turn-4");
+        var history = new InMemoryConversationHistory();
+        history.Replace(messages);
+        var stored = history.Messages.ToArray();
+        var newestTokens = Estimate(stored, 8, 10);
+        var toolTokens = Estimate(stored, 4, 8);
+        var previousTokens = Estimate(stored, 2, 4);
+        var budget = newestTokens + toolTokens;
+
+        var selected = new RecentTurnContextSelector(3, budget).Select(history.Messages);
+
+        Assert.True(Estimate(selected, 0, selected.Count) <= budget);
+        Assert.True(Estimate(selected, 0, selected.Count) + previousTokens > budget);
+        Assert.Equal(stored.Skip(4).ToArray(), selected.ToArray());
+        Assert.Same(stored[5], selected[1]);
+        Assert.Same(stored[6], selected[2]);
+        var selectedJson = JsonSerializer.Serialize(selected);
+        Assert.DoesNotContain("turn-1", selectedJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("turn-2", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"c-3\"", JsonSerializer.Serialize(selected[1]), StringComparison.Ordinal);
+        Assert.Contains("\"thoughtSignature\":\"sig-3\"", JsonSerializer.Serialize(selected[1]), StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"c-3\"", JsonSerializer.Serialize(selected[2]), StringComparison.Ordinal);
+        Assert.Contains("\"functionResponse\"", JsonSerializer.Serialize(selected[2]), StringComparison.Ordinal);
+        AssertChronological(selectedJson, "turn-3", "sig-3", "functionResponse", "turn-4");
+        AssertSameSequence(stored, history.Messages);
+
+        var limitedByTurns = new RecentTurnContextSelector(1, budget).Select(history.Messages);
+
+        Assert.Equal(stored.Skip(8).ToArray(), limitedByTurns.ToArray());
+        Assert.True(Estimate(limitedByTurns, 0, limitedByTurns.Count) <= budget);
+        Assert.DoesNotContain("c-3", JsonSerializer.Serialize(limitedByTurns), StringComparison.Ordinal);
+        Assert.DoesNotContain("functionResponse", JsonSerializer.Serialize(limitedByTurns), StringComparison.Ordinal);
+        AssertSameSequence(stored, history.Messages);
+    }
+
+    [Fact]
+    public void Select_drops_the_oldest_turns_when_the_token_budget_is_exceeded()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "turn-1");
+        AddToolTurn(history, "turn-2", "c-kept", "sig-kept");
+        AddPlainTurn(history, "turn-3");
+        var stored = history.ToArray();
+        var newestTurnTokens = RecentTurnContextSelector.EstimateTokens(history[6])
+            + RecentTurnContextSelector.EstimateTokens(history[7]);
+        var toolTurnTokens = RecentTurnContextSelector.EstimateTokens(history[2])
+            + RecentTurnContextSelector.EstimateTokens(history[3])
+            + RecentTurnContextSelector.EstimateTokens(history[4])
+            + RecentTurnContextSelector.EstimateTokens(history[5]);
+
+        var selected = new RecentTurnContextSelector(6, newestTurnTokens + toolTurnTokens).Select(history);
+
+        Assert.True(Estimate(selected, 0, selected.Count) <= newestTurnTokens + toolTurnTokens);
+        AssertSameSequence(stored, history);
+        Assert.Equal(stored.Skip(2).ToArray(), selected.ToArray());
+        var selectedJson = JsonSerializer.Serialize(selected);
+        Assert.DoesNotContain("turn-1", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"thoughtSignature\":\"sig-kept\"", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"functionResponse\"", selectedJson, StringComparison.Ordinal);
+        AssertChronological(selectedJson, "turn-2", "sig-kept", "functionResponse", "turn-3");
+    }
+
+    [Fact]
+    public void Select_keeps_a_tool_turn_whole_when_the_budget_fits_only_that_turn()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "turn-1");
+        AddToolTurn(history, "turn-2", "c-whole", "sig-whole");
+        var toolTokens = 0;
+        for (var index = 2; index < history.Count; index++)
+        {
+            toolTokens += RecentTurnContextSelector.EstimateTokens(history[index]);
+        }
+
+        var selected = new RecentTurnContextSelector(6, toolTokens).Select(history);
+
+        Assert.Equal(history.Skip(2).ToArray(), selected.ToArray());
+        Assert.Equal(6, history.Count);
+        var selectedJson = JsonSerializer.Serialize(selected);
+        Assert.DoesNotContain("turn-1", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"c-whole\"", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"thoughtSignature\":\"sig-whole\"", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"functionResponse\"", selectedJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Select_keeps_the_newest_turn_when_it_alone_exceeds_the_budget()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "turn-1");
+        AddToolTurn(history, "turn-2", "c-over", "sig-over");
+        var stored = history.ToArray();
+
+        var selected = new RecentTurnContextSelector(6, 1).Select(history);
+
+        AssertSameSequence(stored, history);
+        Assert.Equal(stored.Skip(2).ToArray(), selected.ToArray());
+        var selectedJson = JsonSerializer.Serialize(selected);
+        Assert.DoesNotContain("turn-1", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"id\":\"c-over\"", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"thoughtSignature\":\"sig-over\"", selectedJson, StringComparison.Ordinal);
+        Assert.Contains("\"functionResponse\"", selectedJson, StringComparison.Ordinal);
+        AssertChronological(selectedJson, "turn-2", "sig-over", "functionResponse");
+    }
+
+    [Fact]
+    public void Select_still_applies_the_turn_limit_when_the_token_budget_would_allow_more()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "turn-1");
+        AddPlainTurn(history, "turn-2");
+        AddPlainTurn(history, "turn-3");
+
+        var selected = new RecentTurnContextSelector(2, 4000).Select(history);
+
+        Assert.Equal(6, history.Count);
+        Assert.Equal(history.Skip(2).ToArray(), selected.ToArray());
+        Assert.DoesNotContain("turn-1", JsonSerializer.Serialize(selected), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Constructor_rejects_a_token_budget_below_one(int maxHistoryTokens)
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(
+            () => new RecentTurnContextSelector(1, maxHistoryTokens));
+
+        Assert.Equal("maxHistoryTokens", exception.ParamName);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
@@ -179,6 +317,17 @@ public sealed class RecentTurnContextSelectorTests
         history.Add(FunctionCall(id, signature));
         history.Add(FunctionResponse(id));
         history.Add(Model("answer " + prompt));
+    }
+
+    private static int Estimate(IReadOnlyList<object> messages, int start, int end)
+    {
+        var tokens = 0;
+        for (var index = start; index < end; index++)
+        {
+            tokens += RecentTurnContextSelector.EstimateTokens(messages[index]);
+        }
+
+        return tokens;
     }
 
     private static void AssertSameSequence(object[] expected, IReadOnlyList<object> actual)

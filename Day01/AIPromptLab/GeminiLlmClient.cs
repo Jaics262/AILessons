@@ -97,7 +97,8 @@ public sealed class GeminiLlmClient : IDisposable
             settings.MaxContextTurns,
             settings.MaxFunctionRounds,
             settings.Model,
-            settings.RequestTimeout)
+            settings.RequestTimeout,
+            maxHistoryTokens: settings.MaxHistoryTokens)
     {
     }
 
@@ -115,7 +116,8 @@ public sealed class GeminiLlmClient : IDisposable
             settings.RequestTimeout,
             retryPolicy,
             apiKey,
-            useEnvironmentForApiKey: false)
+            useEnvironmentForApiKey: false,
+            maxHistoryTokens: settings.MaxHistoryTokens)
     {
     }
 
@@ -131,13 +133,23 @@ public sealed class GeminiLlmClient : IDisposable
     }
 
     public GeminiLlmClient(HttpClient? httpClient, IConversationHistory? history, int maxContextTurns)
+        : this(httpClient, history, maxContextTurns, PromptLabSettings.DefaultMaxHistoryTokens)
+    {
+    }
+
+    public GeminiLlmClient(
+        HttpClient? httpClient,
+        IConversationHistory? history,
+        int maxContextTurns,
+        int maxHistoryTokens)
         : this(
             httpClient,
             history,
             maxContextTurns,
             PromptLabSettings.DefaultMaxFunctionRounds,
             PromptLabSettings.DefaultModel,
-            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes))
+            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes),
+            maxHistoryTokens: maxHistoryTokens)
     {
     }
 
@@ -150,7 +162,8 @@ public sealed class GeminiLlmClient : IDisposable
         TimeSpan requestTimeout,
         HttpRetryPolicy? retryPolicy = null,
         string? apiKey = null,
-        bool useEnvironmentForApiKey = true)
+        bool useEnvironmentForApiKey = true,
+        int maxHistoryTokens = PromptLabSettings.DefaultMaxHistoryTokens)
     {
         if (maxFunctionRounds < 1)
         {
@@ -172,7 +185,7 @@ public sealed class GeminiLlmClient : IDisposable
         }
 
         _history = history ?? new InMemoryConversationHistory();
-        _contextSelector = new RecentTurnContextSelector(maxContextTurns);
+        _contextSelector = new RecentTurnContextSelector(maxContextTurns, maxHistoryTokens);
         _maxFunctionRounds = maxFunctionRounds;
         _model = model;
         _retryPolicy = retryPolicy ?? new HttpRetryPolicy();
