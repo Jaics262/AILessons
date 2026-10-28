@@ -903,6 +903,109 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_sends_omitted_key_facts_and_keeps_recent_turns_verbatim()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+        var omittedPrompt = string.Join(
+            '\n',
+            "Decision: use the stored price",
+            "Constraint: do not invent missing information",
+            "Completed: calculated the notebook total",
+            "Unresolved: confirm the VAT rate",
+            "The notebook colour is blue.");
+        var recentPrompt = "Decision: keep this recent decision\nRecent question.";
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, maxContextTurns: 1))
+        {
+            await client.SendPromptAsync(omittedPrompt);
+
+            Assert.Null(history.Summary);
+            Assert.Contains("Decision: use the stored price", handler.Bodies[0], StringComparison.Ordinal);
+            Assert.DoesNotContain(ConversationSummary.Heading, handler.Bodies[0], StringComparison.Ordinal);
+
+            await client.SendPromptAsync(recentPrompt);
+
+            Assert.Null(history.Summary);
+            Assert.Contains("The notebook colour is blue.", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.Contains("Decision: use the stored price", handler.Bodies[1], StringComparison.Ordinal);
+            Assert.DoesNotContain(ConversationSummary.Heading, handler.Bodies[1], StringComparison.Ordinal);
+
+            var firstStoredMessage = history.Messages[0];
+            await client.SendPromptAsync("New question.");
+
+            var request = handler.Bodies[2];
+            Assert.DoesNotContain("Decision: use the stored price", request, StringComparison.Ordinal);
+            Assert.DoesNotContain("The notebook colour is blue.", request, StringComparison.Ordinal);
+            Assert.Contains("Decision: keep this recent decision", request, StringComparison.Ordinal);
+            Assert.Equal(1, CountOccurrences(request, "A stored answer."));
+            AssertChronological(
+                request,
+                ConversationSummary.Heading,
+                "use the stored price",
+                "do not invent missing information",
+                "calculated the notebook total",
+                "confirm the VAT rate",
+                "Recent question.",
+                "A stored answer.",
+                "New question.");
+            Assert.NotNull(history.Summary);
+            Assert.Equal(["use the stored price"], history.Summary.Decisions);
+            Assert.Equal(["do not invent missing information"], history.Summary.Constraints);
+            Assert.Equal(["calculated the notebook total"], history.Summary.CompletedActions);
+            Assert.Equal(["confirm the VAT rate"], history.Summary.UnresolvedTasks);
+            Assert.DoesNotContain("keep this recent decision", history.Summary.Decisions);
+            Assert.Equal(6, history.Messages.Count);
+            Assert.Same(firstStoredMessage, history.Messages[0]);
+            Assert.Contains("The notebook colour is blue.", JsonText(history.Messages[0]), StringComparison.Ordinal);
+            Assert.DoesNotContain(ConversationSummary.Heading, JsonText(history.Messages), StringComparison.Ordinal);
+
+            client.ResetConversation();
+
+            Assert.Empty(history.Messages);
+            Assert.Null(history.Summary);
+        }
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_drops_a_summary_over_the_summary_token_budget_without_changing_history()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+        var omittedPrompt = "Decision: use the stored price\nThe notebook colour is blue.";
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(
+            CreateHttpClient(handler),
+            history,
+            maxContextTurns: 1,
+            maxHistoryTokens: PromptLabSettings.DefaultMaxHistoryTokens,
+            maxSummaryTokens: 1))
+        {
+            await client.SendPromptAsync(omittedPrompt);
+            await client.SendPromptAsync("Recent question.");
+            var firstStoredMessage = history.Messages[0];
+
+            await client.SendPromptAsync("New question.");
+
+            var request = handler.Bodies[2];
+            Assert.DoesNotContain(ConversationSummary.Heading, request, StringComparison.Ordinal);
+            Assert.DoesNotContain("use the stored price", request, StringComparison.Ordinal);
+            Assert.DoesNotContain("The notebook colour is blue.", request, StringComparison.Ordinal);
+            AssertChronological(request, "Recent question.", "A stored answer.", "New question.");
+            Assert.Null(history.Summary);
+            Assert.Equal(6, history.Messages.Count);
+            Assert.Same(firstStoredMessage, history.Messages[0]);
+            Assert.Contains("The notebook colour is blue.", JsonText(history.Messages[0]), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task SendPromptAsync_uses_the_recent_turn_window_without_dropping_stored_history()
     {
         var calls = 0;

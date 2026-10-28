@@ -19,6 +19,7 @@ public static class PromptLabServices
 
             return ConversationHistoryFactory.Create(historyProvider);
         });
+        services.AddSingleton<IConversationSummarizer, DeterministicConversationSummarizer>();
         services.AddSingleton<HttpRetryPolicy>();
         services.AddSingleton(static provider =>
         {
@@ -27,7 +28,8 @@ public static class PromptLabServices
                 provider.GetRequiredService<IConversationHistory>(),
                 provider.GetRequiredService<PromptLabSettings>(),
                 configuration[ApiKeyName],
-                provider.GetRequiredService<HttpRetryPolicy>());
+                provider.GetRequiredService<HttpRetryPolicy>(),
+                provider.GetRequiredService<IConversationSummarizer>());
         });
         services.AddHostedService<PromptLabWorker>();
         return services;

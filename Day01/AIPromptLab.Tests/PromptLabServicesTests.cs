@@ -12,6 +12,7 @@ public sealed class PromptLabServicesTests
             ("ConversationHistory", "InMemory"),
             ("MaxContextTurns", "5"),
             ("MaxHistoryTokens", "1200"),
+            ("MaxSummaryTokens", "80"),
             ("MaxFunctionRounds", "2"),
             ("Model", "gemini-test"),
             ("RequestTimeoutMinutes", "3"),
@@ -19,15 +20,19 @@ public sealed class PromptLabServicesTests
 
         var settings = provider.GetRequiredService<PromptLabSettings>();
         var history = provider.GetRequiredService<IConversationHistory>();
+        var summarizer = provider.GetRequiredService<IConversationSummarizer>();
         var client = provider.GetRequiredService<GeminiLlmClient>();
 
         Assert.Equal(5, settings.MaxContextTurns);
         Assert.Equal(1200, settings.MaxHistoryTokens);
+        Assert.Equal(80, settings.MaxSummaryTokens);
         Assert.Equal(2, settings.MaxFunctionRounds);
         Assert.Equal("gemini-test", settings.Model);
         Assert.IsType<InMemoryConversationHistory>(history);
+        Assert.IsType<DeterministicConversationSummarizer>(summarizer);
         Assert.Same(client, provider.GetRequiredService<GeminiLlmClient>());
         Assert.Same(history, provider.GetRequiredService<IConversationHistory>());
+        Assert.Same(summarizer, provider.GetRequiredService<IConversationSummarizer>());
     }
 
     [Fact]

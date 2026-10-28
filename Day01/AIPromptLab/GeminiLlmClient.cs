@@ -53,7 +53,7 @@ public sealed class GeminiLlmClient : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly string _apiKey;
     private readonly IConversationHistory _history;
-    private readonly RecentTurnContextSelector _contextSelector;
+    private readonly ConversationContextAssembler _contextAssembler;
     private readonly int _maxFunctionRounds;
     private readonly string _model;
     private readonly HttpRetryPolicy _retryPolicy;
@@ -98,7 +98,8 @@ public sealed class GeminiLlmClient : IDisposable
             settings.MaxFunctionRounds,
             settings.Model,
             settings.RequestTimeout,
-            maxHistoryTokens: settings.MaxHistoryTokens)
+            maxHistoryTokens: settings.MaxHistoryTokens,
+            maxSummaryTokens: settings.MaxSummaryTokens)
     {
     }
 
@@ -106,7 +107,8 @@ public sealed class GeminiLlmClient : IDisposable
         IConversationHistory history,
         PromptLabSettings settings,
         string? apiKey,
-        HttpRetryPolicy retryPolicy)
+        HttpRetryPolicy retryPolicy,
+        IConversationSummarizer? summarizer = null)
         : this(
             httpClient: null,
             history,
@@ -117,7 +119,9 @@ public sealed class GeminiLlmClient : IDisposable
             retryPolicy,
             apiKey,
             useEnvironmentForApiKey: false,
-            maxHistoryTokens: settings.MaxHistoryTokens)
+            maxHistoryTokens: settings.MaxHistoryTokens,
+            maxSummaryTokens: settings.MaxSummaryTokens,
+            summarizer: summarizer)
     {
     }
 
@@ -157,13 +161,33 @@ public sealed class GeminiLlmClient : IDisposable
         HttpClient? httpClient,
         IConversationHistory? history,
         int maxContextTurns,
+        int maxHistoryTokens,
+        int maxSummaryTokens)
+        : this(
+            httpClient,
+            history,
+            maxContextTurns,
+            PromptLabSettings.DefaultMaxFunctionRounds,
+            PromptLabSettings.DefaultModel,
+            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes),
+            maxHistoryTokens: maxHistoryTokens,
+            maxSummaryTokens: maxSummaryTokens)
+    {
+    }
+
+    public GeminiLlmClient(
+        HttpClient? httpClient,
+        IConversationHistory? history,
+        int maxContextTurns,
         int maxFunctionRounds,
         string model,
         TimeSpan requestTimeout,
         HttpRetryPolicy? retryPolicy = null,
         string? apiKey = null,
         bool useEnvironmentForApiKey = true,
-        int maxHistoryTokens = PromptLabSettings.DefaultMaxHistoryTokens)
+        int maxHistoryTokens = PromptLabSettings.DefaultMaxHistoryTokens,
+        IConversationSummarizer? summarizer = null,
+        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens)
     {
         if (maxFunctionRounds < 1)
         {
@@ -185,7 +209,10 @@ public sealed class GeminiLlmClient : IDisposable
         }
 
         _history = history ?? new InMemoryConversationHistory();
-        _contextSelector = new RecentTurnContextSelector(maxContextTurns, maxHistoryTokens);
+        _contextAssembler = new ConversationContextAssembler(
+            new RecentTurnContextSelector(maxContextTurns, maxHistoryTokens),
+            summarizer ?? new DeterministicConversationSummarizer(),
+            maxSummaryTokens);
         _maxFunctionRounds = maxFunctionRounds;
         _model = model;
         _retryPolicy = retryPolicy ?? new HttpRetryPolicy();
@@ -231,16 +258,10 @@ public sealed class GeminiLlmClient : IDisposable
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-        var context = _contextSelector.Select(_history.Messages);
-        var contents = new List<object>(context)
-        {
-            new
-            {
-                role = "user",
-                parts = new object[] { new { text = prompt } }
-            }
-        };
-        var contextCount = context.Count;
+        var assembled = _contextAssembler.Assemble(_history.Messages, prompt, Redact);
+        var contents = assembled.Contents;
+        var contextCount = assembled.PrefixCount;
+        var conversationSummary = assembled.Summary;
         var totals = new List<decimal>();
 
         try
@@ -267,12 +288,26 @@ public sealed class GeminiLlmClient : IDisposable
                     var safeText = Redact(text);
                     if (TryDeserializeSummary(safeText, out var summary))
                     {
-                        return CompleteTurn(contents, contextCount, apiResponse, functionCalls, totals, summary!);
+                        return CompleteTurn(
+                            contents,
+                            contextCount,
+                            apiResponse,
+                            functionCalls,
+                            totals,
+                            summary!,
+                            conversationSummary);
                     }
 
                     if (formattingSummary || !allowTools)
                     {
-                        return CompleteTurn(contents, contextCount, apiResponse, functionCalls, totals, DeserializeSummary(safeText));
+                        return CompleteTurn(
+                            contents,
+                            contextCount,
+                            apiResponse,
+                            functionCalls,
+                            totals,
+                            DeserializeSummary(safeText),
+                            conversationSummary);
                     }
 
                     Log.Warning("The model text was not a learning summary. Requesting the structured summary.");
@@ -358,9 +393,11 @@ public sealed class GeminiLlmClient : IDisposable
         GeminiApiResponse apiResponse,
         IReadOnlyList<GeminiFunctionCall> functionCalls,
         List<decimal> totals,
-        LearningSummary summary)
+        LearningSummary summary,
+        ConversationSummary? conversationSummary)
     {
         contents.Add(new { role = "model", parts = CreateModelTextParts(apiResponse) });
+        _history.ReplaceSummary(conversationSummary);
         _history.Replace(_history.Messages.Concat(contents.Skip(contextCount)));
         return new GeminiPromptResult(summary, functionCalls, totals);
     }

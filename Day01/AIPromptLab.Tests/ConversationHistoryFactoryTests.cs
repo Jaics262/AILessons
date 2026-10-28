@@ -11,6 +11,7 @@ public sealed class ConversationHistoryFactoryTests
 
         Assert.IsType<InMemoryConversationHistory>(history);
         Assert.Empty(history.Messages);
+        Assert.Null(history.Summary);
     }
 
     [Theory]
