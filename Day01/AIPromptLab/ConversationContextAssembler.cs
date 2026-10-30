@@ -1,12 +1,15 @@
 public sealed class ConversationContextAssembler
 {
+    public const string RetrievedMemoriesHeading = "Retrieved memories";
+
     private readonly RecentTurnContextSelector _selector;
     private readonly IConversationSummarizer _summarizer;
 
     public ConversationContextAssembler(
         RecentTurnContextSelector selector,
         IConversationSummarizer summarizer,
-        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens)
+        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens,
+        int maxMemoryTokens = PromptLabSettings.DefaultMaxMemoryTokens)
     {
         ArgumentNullException.ThrowIfNull(selector);
         ArgumentNullException.ThrowIfNull(summarizer);
@@ -18,17 +21,28 @@ public sealed class ConversationContextAssembler
                 "The maximum summary token budget must be greater than zero.");
         }
 
+        if (maxMemoryTokens < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxMemoryTokens),
+                "The maximum memory token budget must be greater than zero.");
+        }
+
         _selector = selector;
         _summarizer = summarizer;
         MaxSummaryTokens = maxSummaryTokens;
+        MaxMemoryTokens = maxMemoryTokens;
     }
 
     public int MaxSummaryTokens { get; }
 
+    public int MaxMemoryTokens { get; }
+
     public ConversationContext Assemble(
         IReadOnlyList<object> messages,
         string prompt,
-        Func<string, string>? redact = null)
+        Func<string, string>? redact = null,
+        IReadOnlyList<MemoryEntry>? memories = null)
     {
         ArgumentNullException.ThrowIfNull(messages);
 
@@ -54,7 +68,19 @@ public sealed class ConversationContextAssembler
                 text = redact(text);
             }
 
-            contents.Add(CreateSummaryMessage(text));
+            contents.Add(CreateTextMessage(text));
+        }
+
+        var retrievedMemories = FitMemories(memories, redact);
+        if (retrievedMemories.Count > 0)
+        {
+            var text = FormatMemories(retrievedMemories);
+            if (redact is not null)
+            {
+                text = redact(text);
+            }
+
+            contents.Add(CreateTextMessage(text));
         }
 
         contents.AddRange(recentTurns);
@@ -66,7 +92,13 @@ public sealed class ConversationContextAssembler
     public static int EstimateSummaryTokens(string text)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
-        return RecentTurnContextSelector.EstimateTokens(CreateSummaryMessage(text));
+        return RecentTurnContextSelector.EstimateTokens(CreateTextMessage(text));
+    }
+
+    public static int EstimateMemoryTokens(string text)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(text);
+        return RecentTurnContextSelector.EstimateTokens(CreateTextMessage(text));
     }
 
     private ConversationSummary? FitSummary(ConversationSummary summary, Func<string, string>? redact)
@@ -117,7 +149,51 @@ public sealed class ConversationContextAssembler
         return new ConversationSummary(decisions, constraints, completedActions, unresolvedTasks);
     }
 
-    private static object CreateSummaryMessage(string text)
+    private List<MemoryEntry> FitMemories(IReadOnlyList<MemoryEntry>? memories, Func<string, string>? redact)
+    {
+        var fitted = new List<MemoryEntry>();
+        if (memories is null)
+        {
+            return fitted;
+        }
+
+        foreach (var memory in memories)
+        {
+            ArgumentNullException.ThrowIfNull(memory);
+            fitted.Add(memory);
+        }
+
+        while (fitted.Count > 0)
+        {
+            var text = FormatMemories(fitted);
+            if (redact is not null)
+            {
+                text = redact(text);
+            }
+
+            if (!string.IsNullOrWhiteSpace(text) && EstimateMemoryTokens(text) <= MaxMemoryTokens)
+            {
+                return fitted;
+            }
+
+            fitted.RemoveAt(fitted.Count - 1);
+        }
+
+        return fitted;
+    }
+
+    private static string FormatMemories(IReadOnlyList<MemoryEntry> memories)
+    {
+        var lines = new List<string> { RetrievedMemoriesHeading };
+        foreach (var memory in memories)
+        {
+            lines.Add("- " + memory.Text);
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static object CreateTextMessage(string text)
     {
         return new
         {

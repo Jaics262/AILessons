@@ -11,6 +11,9 @@ public sealed class PromptLabSettings
     // Heuristic budget for the compact summary of turns outside the recent window.
     public const int DefaultMaxSummaryTokens = 200;
 
+    // Heuristic budget for retrieved memories added to a request.
+    public const int DefaultMaxMemoryTokens = 200;
+
     public const int DefaultMaxFunctionRounds = 4;
     public const string DefaultModel = "gemini-3.8-flash";
     public const int DefaultRequestTimeoutMinutes = 5;
@@ -19,6 +22,7 @@ public sealed class PromptLabSettings
         int maxContextTurns,
         int maxHistoryTokens,
         int maxSummaryTokens,
+        int maxMemoryTokens,
         int maxFunctionRounds,
         string model,
         TimeSpan requestTimeout)
@@ -44,6 +48,13 @@ public sealed class PromptLabSettings
                 "The maximum summary token budget must be greater than zero.");
         }
 
+        if (maxMemoryTokens < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxMemoryTokens),
+                "The maximum memory token budget must be greater than zero.");
+        }
+
         if (maxFunctionRounds < 1)
         {
             throw new ArgumentOutOfRangeException(
@@ -66,6 +77,7 @@ public sealed class PromptLabSettings
         MaxContextTurns = maxContextTurns;
         MaxHistoryTokens = maxHistoryTokens;
         MaxSummaryTokens = maxSummaryTokens;
+        MaxMemoryTokens = maxMemoryTokens;
         MaxFunctionRounds = maxFunctionRounds;
         Model = model;
         RequestTimeout = requestTimeout;
@@ -76,6 +88,8 @@ public sealed class PromptLabSettings
     public int MaxHistoryTokens { get; }
 
     public int MaxSummaryTokens { get; }
+
+    public int MaxMemoryTokens { get; }
 
     public int MaxFunctionRounds { get; }
 
@@ -91,6 +105,7 @@ public sealed class PromptLabSettings
             ReadPositiveInt(configuration, "MaxContextTurns", DefaultMaxContextTurns),
             ReadPositiveInt(configuration, "MaxHistoryTokens", DefaultMaxHistoryTokens),
             ReadPositiveInt(configuration, "MaxSummaryTokens", DefaultMaxSummaryTokens),
+            ReadPositiveInt(configuration, "MaxMemoryTokens", DefaultMaxMemoryTokens),
             ReadPositiveInt(configuration, "MaxFunctionRounds", DefaultMaxFunctionRounds),
             ReadText(configuration, "Model", DefaultModel),
             TimeSpan.FromMinutes(ReadPositiveInt(configuration, "RequestTimeoutMinutes", DefaultRequestTimeoutMinutes)));

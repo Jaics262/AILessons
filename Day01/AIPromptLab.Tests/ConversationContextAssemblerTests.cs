@@ -158,6 +158,99 @@ public sealed class ConversationContextAssemblerTests
     }
 
     [Fact]
+    public void Assemble_omits_the_memory_section_when_the_memory_store_is_empty()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "Recent question.");
+        var stored = history.ToArray();
+
+        var context = CreateAssembler().Assemble(history, "New question.", memories: []);
+        var json = JsonSerializer.Serialize(context.Contents);
+
+        Assert.Equal(2, context.PrefixCount);
+        Assert.DoesNotContain(ConversationContextAssembler.RetrievedMemoriesHeading, json, StringComparison.Ordinal);
+        AssertChronological(json, "Recent question.", "New question.");
+        AssertSameSequence(stored, history);
+    }
+
+    [Fact]
+    public void Assemble_places_retrieved_memories_before_verbatim_recent_turns_and_the_prompt()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "Older notebook question.");
+        AddPlainTurn(history, "Recent question.");
+        var stored = history.ToArray();
+        var newestTokens = Estimate(stored, 2, 4);
+        var retryAfter = Memory("retry-after", "HTTP retries should respect Retry-After.");
+        var dotnet = Memory("dotnet", "The project uses .NET 10 and xUnit.");
+        var memories = new List<MemoryEntry> { retryAfter, dotnet };
+        var supplied = memories.ToArray();
+
+        var context = CreateAssembler(maxContextTurns: 6, maxHistoryTokens: newestTokens)
+            .Assemble(history, "How should the application handle HTTP retry delays?", memories: memories);
+        var json = JsonSerializer.Serialize(context.Contents);
+
+        Assert.Equal(3, context.PrefixCount);
+        Assert.Same(stored[2], context.Contents[1]);
+        Assert.Same(stored[3], context.Contents[2]);
+        Assert.DoesNotContain("Older notebook question.", json, StringComparison.Ordinal);
+        AssertChronological(
+            json,
+            ConversationContextAssembler.RetrievedMemoriesHeading,
+            "HTTP retries should respect Retry-After.",
+            "Recent question.",
+            "How should the application handle HTTP retry delays?");
+        AssertSameSequence(stored, history);
+        Assert.Same(supplied[0], memories[0]);
+        Assert.Same(supplied[1], memories[1]);
+    }
+
+    [Fact]
+    public void Assemble_drops_lower_ranked_memories_until_they_fit_the_memory_budget()
+    {
+        var first = Memory("retry-after", "HTTP retries should respect Retry-After.");
+        var second = Memory("dotnet", "The project uses .NET 10 and xUnit.");
+        var budget = ConversationContextAssembler.EstimateMemoryTokens(
+            ConversationContextAssembler.RetrievedMemoriesHeading + "\n- " + first.Text);
+        var history = new List<object>();
+        AddToolTurn(history, "Calculate the notebook total.", "c-kept", "sig-kept");
+        var stored = history.ToArray();
+
+        var context = CreateAssembler(maxContextTurns: 1, maxMemoryTokens: budget)
+            .Assemble(history, "New question.", memories: [first, second]);
+        var json = JsonSerializer.Serialize(context.Contents);
+        var callIndex = json.IndexOf("\"thoughtSignature\":\"sig-kept\"", StringComparison.Ordinal);
+        var responseIndex = json.IndexOf("\"functionResponse\"", StringComparison.Ordinal);
+        var promptIndex = json.IndexOf("New question.", StringComparison.Ordinal);
+
+        Assert.Contains("HTTP retries should respect Retry-After.", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("The project uses .NET 10 and xUnit.", json, StringComparison.Ordinal);
+        Assert.True(callIndex >= 0 && callIndex < responseIndex && responseIndex < promptIndex);
+        Assert.Same(stored[0], context.Contents[1]);
+        Assert.Same(stored[1], context.Contents[2]);
+        Assert.Same(stored[2], context.Contents[3]);
+        Assert.Same(stored[3], context.Contents[4]);
+        AssertSameSequence(stored, history);
+    }
+
+    [Fact]
+    public void Assemble_omits_retrieved_memories_when_none_fit_the_memory_budget()
+    {
+        var history = new List<object>();
+        AddPlainTurn(history, "Recent question.");
+
+        var context = CreateAssembler(maxMemoryTokens: 1).Assemble(
+            history,
+            "New question.",
+            memories: [Memory("retry-after", "HTTP retries should respect Retry-After.")]);
+        var json = JsonSerializer.Serialize(context.Contents);
+
+        Assert.Equal(2, context.PrefixCount);
+        Assert.DoesNotContain(ConversationContextAssembler.RetrievedMemoriesHeading, json, StringComparison.Ordinal);
+        AssertChronological(json, "Recent question.", "New question.");
+    }
+
+    [Fact]
     public void Assemble_rejects_a_null_history()
     {
         var exception = Assert.Throws<ArgumentNullException>(() => CreateAssembler().Assemble(null!, "New question."));
@@ -190,15 +283,36 @@ public sealed class ConversationContextAssemblerTests
         Assert.Equal("maxSummaryTokens", exception.ParamName);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Constructor_rejects_a_memory_budget_below_one(int maxMemoryTokens)
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ConversationContextAssembler(
+                new RecentTurnContextSelector(1),
+                new DeterministicConversationSummarizer(),
+                maxMemoryTokens: maxMemoryTokens));
+
+        Assert.Equal("maxMemoryTokens", exception.ParamName);
+    }
+
     private static ConversationContextAssembler CreateAssembler(
         int maxContextTurns = 6,
         int maxHistoryTokens = PromptLabSettings.DefaultMaxHistoryTokens,
-        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens)
+        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens,
+        int maxMemoryTokens = PromptLabSettings.DefaultMaxMemoryTokens)
     {
         return new ConversationContextAssembler(
             new RecentTurnContextSelector(maxContextTurns, maxHistoryTokens),
             new DeterministicConversationSummarizer(),
-            maxSummaryTokens);
+            maxSummaryTokens,
+            maxMemoryTokens);
+    }
+
+    private static MemoryEntry Memory(string id, string text)
+    {
+        return new MemoryEntry(id, text, DateTimeOffset.Parse("2026-10-30T09:00:00Z"));
     }
 
     private static void AddPlainTurn(List<object> history, string prompt)

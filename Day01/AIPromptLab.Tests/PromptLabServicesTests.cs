@@ -13,6 +13,7 @@ public sealed class PromptLabServicesTests
             ("MaxContextTurns", "5"),
             ("MaxHistoryTokens", "1200"),
             ("MaxSummaryTokens", "80"),
+            ("MaxMemoryTokens", "40"),
             ("MaxFunctionRounds", "2"),
             ("Model", "gemini-test"),
             ("RequestTimeoutMinutes", "3"),
@@ -21,11 +22,14 @@ public sealed class PromptLabServicesTests
         var settings = provider.GetRequiredService<PromptLabSettings>();
         var history = provider.GetRequiredService<IConversationHistory>();
         var summarizer = provider.GetRequiredService<IConversationSummarizer>();
+        var memoryStore = provider.GetRequiredService<InMemoryMemoryStore>();
+        var memoryScorer = provider.GetRequiredService<KeywordMemoryScorer>();
         var client = provider.GetRequiredService<GeminiLlmClient>();
 
         Assert.Equal(5, settings.MaxContextTurns);
         Assert.Equal(1200, settings.MaxHistoryTokens);
         Assert.Equal(80, settings.MaxSummaryTokens);
+        Assert.Equal(40, settings.MaxMemoryTokens);
         Assert.Equal(2, settings.MaxFunctionRounds);
         Assert.Equal("gemini-test", settings.Model);
         Assert.IsType<InMemoryConversationHistory>(history);
@@ -33,6 +37,8 @@ public sealed class PromptLabServicesTests
         Assert.Same(client, provider.GetRequiredService<GeminiLlmClient>());
         Assert.Same(history, provider.GetRequiredService<IConversationHistory>());
         Assert.Same(summarizer, provider.GetRequiredService<IConversationSummarizer>());
+        Assert.Same(memoryStore, provider.GetRequiredService<InMemoryMemoryStore>());
+        Assert.Same(memoryScorer, provider.GetRequiredService<KeywordMemoryScorer>());
     }
 
     [Fact]

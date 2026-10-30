@@ -1006,6 +1006,43 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_sends_retrieved_memories_before_recent_turns_without_storing_them()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+        var store = new InMemoryMemoryStore();
+        var createdAt = DateTimeOffset.Parse("2026-10-30T09:00:00Z");
+        store.Add(new MemoryEntry("dotnet", "The project uses .NET 10 and xUnit.", createdAt));
+        store.Add(new MemoryEntry("retry-after", "HTTP retries should respect Retry-After.", createdAt));
+        store.Add(new MemoryEntry("verbatim", "Recent conversation turns must remain verbatim.", createdAt));
+        var stored = store.Retrieve();
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, store))
+        {
+            await client.SendPromptAsync("How should the application handle HTTP retry delays?");
+            await client.SendPromptAsync("What is the retry header?");
+
+            var request = handler.Bodies[1];
+            AssertChronological(
+                request,
+                ConversationContextAssembler.RetrievedMemoriesHeading,
+                "HTTP retries should respect Retry-After.",
+                "How should the application handle HTTP retry delays?",
+                "What is the retry header?");
+            Assert.Equal(4, history.Messages.Count);
+            Assert.DoesNotContain(
+                ConversationContextAssembler.RetrievedMemoriesHeading,
+                JsonText(history.Messages),
+                StringComparison.Ordinal);
+            Assert.Equal(stored.Select(entry => entry.Id), store.Retrieve().Select(entry => entry.Id));
+            Assert.Same(stored[1], store.Find("retry-after"));
+        }
+    }
+
+    [Fact]
     public async Task SendPromptAsync_uses_the_recent_turn_window_without_dropping_stored_history()
     {
         var calls = 0;

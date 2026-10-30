@@ -53,6 +53,8 @@ public sealed class GeminiLlmClient : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly string _apiKey;
     private readonly IConversationHistory _history;
+    private readonly InMemoryMemoryStore _memoryStore;
+    private readonly KeywordMemoryScorer _memoryScorer;
     private readonly ConversationContextAssembler _contextAssembler;
     private readonly int _maxFunctionRounds;
     private readonly string _model;
@@ -99,7 +101,8 @@ public sealed class GeminiLlmClient : IDisposable
             settings.Model,
             settings.RequestTimeout,
             maxHistoryTokens: settings.MaxHistoryTokens,
-            maxSummaryTokens: settings.MaxSummaryTokens)
+            maxSummaryTokens: settings.MaxSummaryTokens,
+            maxMemoryTokens: settings.MaxMemoryTokens)
     {
     }
 
@@ -108,7 +111,9 @@ public sealed class GeminiLlmClient : IDisposable
         PromptLabSettings settings,
         string? apiKey,
         HttpRetryPolicy retryPolicy,
-        IConversationSummarizer? summarizer = null)
+        IConversationSummarizer? summarizer = null,
+        InMemoryMemoryStore? memoryStore = null,
+        KeywordMemoryScorer? memoryScorer = null)
         : this(
             httpClient: null,
             history,
@@ -121,7 +126,10 @@ public sealed class GeminiLlmClient : IDisposable
             useEnvironmentForApiKey: false,
             maxHistoryTokens: settings.MaxHistoryTokens,
             maxSummaryTokens: settings.MaxSummaryTokens,
-            summarizer: summarizer)
+            summarizer: summarizer,
+            maxMemoryTokens: settings.MaxMemoryTokens,
+            memoryStore: memoryStore,
+            memoryScorer: memoryScorer)
     {
     }
 
@@ -177,6 +185,23 @@ public sealed class GeminiLlmClient : IDisposable
 
     public GeminiLlmClient(
         HttpClient? httpClient,
+        IConversationHistory history,
+        InMemoryMemoryStore memoryStore,
+        int maxMemoryTokens = PromptLabSettings.DefaultMaxMemoryTokens)
+        : this(
+            httpClient,
+            history,
+            PromptLabSettings.DefaultMaxContextTurns,
+            PromptLabSettings.DefaultMaxFunctionRounds,
+            PromptLabSettings.DefaultModel,
+            TimeSpan.FromMinutes(PromptLabSettings.DefaultRequestTimeoutMinutes),
+            memoryStore: memoryStore,
+            maxMemoryTokens: maxMemoryTokens)
+    {
+    }
+
+    public GeminiLlmClient(
+        HttpClient? httpClient,
         IConversationHistory? history,
         int maxContextTurns,
         int maxFunctionRounds,
@@ -187,7 +212,10 @@ public sealed class GeminiLlmClient : IDisposable
         bool useEnvironmentForApiKey = true,
         int maxHistoryTokens = PromptLabSettings.DefaultMaxHistoryTokens,
         IConversationSummarizer? summarizer = null,
-        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens)
+        int maxSummaryTokens = PromptLabSettings.DefaultMaxSummaryTokens,
+        int maxMemoryTokens = PromptLabSettings.DefaultMaxMemoryTokens,
+        InMemoryMemoryStore? memoryStore = null,
+        KeywordMemoryScorer? memoryScorer = null)
     {
         if (maxFunctionRounds < 1)
         {
@@ -209,10 +237,13 @@ public sealed class GeminiLlmClient : IDisposable
         }
 
         _history = history ?? new InMemoryConversationHistory();
+        _memoryStore = memoryStore ?? new InMemoryMemoryStore();
+        _memoryScorer = memoryScorer ?? new KeywordMemoryScorer();
         _contextAssembler = new ConversationContextAssembler(
             new RecentTurnContextSelector(maxContextTurns, maxHistoryTokens),
             summarizer ?? new DeterministicConversationSummarizer(),
-            maxSummaryTokens);
+            maxSummaryTokens,
+            maxMemoryTokens);
         _maxFunctionRounds = maxFunctionRounds;
         _model = model;
         _retryPolicy = retryPolicy ?? new HttpRetryPolicy();
@@ -258,7 +289,8 @@ public sealed class GeminiLlmClient : IDisposable
             throw new ArgumentException("The prompt cannot be empty.", nameof(prompt));
         }
 
-        var assembled = _contextAssembler.Assemble(_history.Messages, prompt, Redact);
+        var memories = _memoryScorer.Search(_memoryStore.Retrieve(), prompt);
+        var assembled = _contextAssembler.Assemble(_history.Messages, prompt, Redact, memories);
         var contents = assembled.Contents;
         var contextCount = assembled.PrefixCount;
         var conversationSummary = assembled.Summary;
