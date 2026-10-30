@@ -1043,6 +1043,49 @@ public sealed class GeminiLlmClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_sends_cosine_ranked_memories_before_recent_turns()
+    {
+        var handler = new RecordingHandler(
+            HttpStatusCode.OK,
+            SuccessJson(LearningSummaryJson(summary: "A stored answer.")));
+        var history = new InMemoryConversationHistory();
+        var store = new InMemoryMemoryStore();
+        var createdAt = DateTimeOffset.Parse("2026-10-30T09:00:00Z");
+        var dotnet = new MemoryEntry("dotnet", FakeTextEmbedder.DotNetProject, createdAt);
+        var verbatim = new MemoryEntry("verbatim", FakeTextEmbedder.VerbatimTurns, createdAt);
+        var retryAfter = new MemoryEntry("retry-after", FakeTextEmbedder.RetryAfter, createdAt);
+        var serverFailure = new MemoryEntry("server-failure", FakeTextEmbedder.TemporaryServerFailure, createdAt);
+        store.Add(dotnet);
+        store.Add(verbatim);
+        store.Add(retryAfter);
+        store.Add(serverFailure);
+        var retriever = new EmbeddingMemoryRetriever(new FakeTextEmbedder());
+        retriever.Index(dotnet);
+        retriever.Index(verbatim);
+        retriever.Index(retryAfter);
+        retriever.Index(serverFailure);
+
+        using (new ApiKeyScope(ApiKey))
+        using (var client = new GeminiLlmClient(CreateHttpClient(handler), history, store, retriever))
+        {
+            await client.SendPromptAsync(FakeTextEmbedder.TransientHttpError);
+
+            AssertChronological(
+                handler.Bodies[0],
+                ConversationContextAssembler.RetrievedMemoriesHeading,
+                FakeTextEmbedder.TemporaryServerFailure,
+                FakeTextEmbedder.TransientHttpError);
+            Assert.DoesNotContain(FakeTextEmbedder.VerbatimTurns, handler.Bodies[0], StringComparison.Ordinal);
+            Assert.Equal(2, history.Messages.Count);
+            Assert.DoesNotContain(
+                ConversationContextAssembler.RetrievedMemoriesHeading,
+                JsonText(history.Messages),
+                StringComparison.Ordinal);
+            Assert.Equal([dotnet, verbatim, retryAfter, serverFailure], store.Retrieve());
+        }
+    }
+
+    [Fact]
     public async Task SendPromptAsync_uses_the_recent_turn_window_without_dropping_stored_history()
     {
         var calls = 0;
