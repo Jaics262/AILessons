@@ -36,7 +36,7 @@ public static class AnswerSupport
         return AnswerSupportResult.Create(claims);
     }
 
-    private static Dictionary<string, string> Index(IReadOnlyList<ClaimEvidence> mappings)
+    internal static Dictionary<string, string> Index(IReadOnlyList<ClaimEvidence> mappings)
     {
         ArgumentNullException.ThrowIfNull(mappings);
 
@@ -59,7 +59,7 @@ public static class AnswerSupport
         return evidenceByClaim;
     }
 
-    private static string NormalizeClaim(string claim)
+    internal static string NormalizeClaim(string claim)
     {
         var text = claim.Trim().TrimEnd('.', '?', '!');
         if (text.StartsWith("and ", StringComparison.OrdinalIgnoreCase))
