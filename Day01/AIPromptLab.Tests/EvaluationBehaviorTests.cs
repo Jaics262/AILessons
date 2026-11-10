@@ -62,6 +62,14 @@ public sealed class EvaluationBehaviorTests
                 "The answer misses the expected fact 'The application uses .NET 10'."
             ],
             report.Results.SelectMany(result => result.FailureReasons).ToArray());
+        Assert.Equal(
+            [
+                EvaluationFailureCategory.UngroundedClaim,
+                EvaluationFailureCategory.MissingExpectedFact,
+                EvaluationFailureCategory.UngroundedClaim,
+                EvaluationFailureCategory.MissingExpectedFact
+            ],
+            report.Results.SelectMany(result => result.FailureCategories).ToArray());
     }
 
     [Theory]
@@ -107,6 +115,9 @@ public sealed class EvaluationBehaviorTests
         Assert.Equal(
             first.Results.SelectMany(result => result.FailureReasons).ToArray(),
             second.Results.SelectMany(result => result.FailureReasons).ToArray());
+        Assert.Equal(
+            first.Results.SelectMany(result => result.FailureCategories).ToArray(),
+            second.Results.SelectMany(result => result.FailureCategories).ToArray());
     }
 
     [Fact]
@@ -145,6 +156,12 @@ public sealed class EvaluationBehaviorTests
                 "The answer misses the expected fact 'HTTP retries respect the Retry-After header'."
             ],
             failed.FailureReasons);
+        Assert.Equal(
+            [EvaluationFailureCode.UngroundedClaim, EvaluationFailureCode.MissingExpectedFact],
+            failed.Failures.Select(failure => failure.Code).ToArray());
+        Assert.Equal(
+            [EvaluationFailureCategory.UngroundedClaim, EvaluationFailureCategory.MissingExpectedFact],
+            failed.FailureCategories);
     }
 
     private static EvaluationCase Case(string id)

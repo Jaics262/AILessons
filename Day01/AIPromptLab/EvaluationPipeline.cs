@@ -1,6 +1,7 @@
 // Scores answer cases with the Day 16 groundedness mappings.
 // A case passes when every claim is supported and a supported claim states each expected fact.
 // An unsupported claim that uses an expected fact's wording is reported once, as unsupported.
+// Each failure is stored as a code. Classification maps that code to a category, and the report still prints the readable reason.
 public static class EvaluationPipeline
 {
     public static EvaluationReport Evaluate(IReadOnlyList<EvaluationCase> cases) =>
@@ -62,7 +63,7 @@ public static class EvaluationPipeline
     {
         if (string.IsNullOrWhiteSpace(item.Answer))
         {
-            return new EvaluationCaseResult(item.Id, false, ["The answer is empty."]);
+            return Classify(item.Id, [EvaluationFailure.EmptyAnswer()]);
         }
 
         AnswerSupportResult support;
@@ -72,15 +73,15 @@ public static class EvaluationPipeline
         }
         catch (ArgumentException exception) when (exception.ParamName == "answer")
         {
-            return new EvaluationCaseResult(item.Id, false, ["The answer must contain at least one claim."]);
+            return Classify(item.Id, [EvaluationFailure.NoClaim()]);
         }
 
-        var reasons = new List<string>();
+        var failures = new List<EvaluationFailure>();
         foreach (var claim in support.Claims)
         {
             if (!claim.IsSupported)
             {
-                reasons.Add($"The claim '{claim.Text}' is not supported by the context.");
+                failures.Add(EvaluationFailure.UngroundedClaim(claim.Text));
             }
         }
 
@@ -88,11 +89,17 @@ public static class EvaluationPipeline
         {
             if (!IsStated(support, evidenceByClaim, fact))
             {
-                reasons.Add($"The answer misses the expected fact '{fact}'.");
+                failures.Add(EvaluationFailure.MissingExpectedFact(fact));
             }
         }
 
-        return new EvaluationCaseResult(item.Id, reasons.Count == 0, reasons);
+        return Classify(item.Id, failures);
+    }
+
+    private static EvaluationCaseResult Classify(string caseId, IReadOnlyList<EvaluationFailure> failures)
+    {
+        var categories = EvaluationFailureClassifier.Classify(failures);
+        return new EvaluationCaseResult(caseId, categories.Count == 0, failures);
     }
 
     private static bool IsStated(

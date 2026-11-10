@@ -21,10 +21,22 @@ public sealed class EvaluationPipelineTests
             ],
             Result(report, AnswerEvaluationSet.UnsupportedClaim).FailureReasons);
         Assert.Equal(
+            [EvaluationFailureCode.UngroundedClaim],
+            Codes(report, AnswerEvaluationSet.UnsupportedClaim));
+        Assert.Equal(
+            [EvaluationFailureCategory.UngroundedClaim],
+            Result(report, AnswerEvaluationSet.UnsupportedClaim).FailureCategories);
+        Assert.Equal(
             [
                 "The answer misses the expected fact 'HTTP retries respect the Retry-After header'."
             ],
             Result(report, AnswerEvaluationSet.MissingExpectedFact).FailureReasons);
+        Assert.Equal(
+            [EvaluationFailureCode.MissingExpectedFact],
+            Codes(report, AnswerEvaluationSet.MissingExpectedFact));
+        Assert.Equal(
+            [EvaluationFailureCategory.MissingExpectedFact],
+            Result(report, AnswerEvaluationSet.MissingExpectedFact).FailureCategories);
         Assert.Equal(
             [
                 "The claim 'The application uses .NET 8' is not supported by the context.",
@@ -32,8 +44,20 @@ public sealed class EvaluationPipelineTests
             ],
             Result(report, AnswerEvaluationSet.WrongFact).FailureReasons);
         Assert.Equal(
+            [EvaluationFailureCode.UngroundedClaim, EvaluationFailureCode.MissingExpectedFact],
+            Codes(report, AnswerEvaluationSet.WrongFact));
+        Assert.Equal(
+            [EvaluationFailureCategory.UngroundedClaim, EvaluationFailureCategory.MissingExpectedFact],
+            Result(report, AnswerEvaluationSet.WrongFact).FailureCategories);
+        Assert.Equal(
             ["The answer is empty."],
             Result(report, AnswerEvaluationSet.EmptyAnswer).FailureReasons);
+        Assert.Equal(
+            [EvaluationFailureCode.EmptyAnswer],
+            Codes(report, AnswerEvaluationSet.EmptyAnswer));
+        Assert.Equal(
+            [EvaluationFailureCategory.EmptyAnswer],
+            Result(report, AnswerEvaluationSet.EmptyAnswer).FailureCategories);
         Assert.Empty(Result(report, AnswerEvaluationSet.CorrectAndGrounded).FailureReasons);
         Assert.Empty(Result(report, AnswerEvaluationSet.DifferentWording).FailureReasons);
         Assert.Equal(
@@ -123,6 +147,12 @@ public sealed class EvaluationPipelineTests
         Assert.Equal(
             first.Results.Select(item => item.FailureReasons.ToArray()).ToArray(),
             second.Results.Select(item => item.FailureReasons.ToArray()).ToArray());
+        Assert.Equal(
+            first.Results.Select(item => item.Failures.Select(failure => failure.Code).ToArray()).ToArray(),
+            second.Results.Select(item => item.Failures.Select(failure => failure.Code).ToArray()).ToArray());
+        Assert.Equal(
+            first.Results.Select(item => item.FailureCategories.ToArray()).ToArray(),
+            second.Results.Select(item => item.FailureCategories.ToArray()).ToArray());
     }
 
     [Fact]
@@ -146,6 +176,12 @@ public sealed class EvaluationPipelineTests
                 "The claim 'HTTP retries respect the Retry-After header' is not supported by the context."
             ],
             result.FailureReasons);
+        Assert.Equal(
+            [EvaluationFailureCode.UngroundedClaim, EvaluationFailureCode.UngroundedClaim],
+            result.Failures.Select(failure => failure.Code).ToArray());
+        Assert.Equal(
+            [EvaluationFailureCategory.UngroundedClaim, EvaluationFailureCategory.UngroundedClaim],
+            result.FailureCategories);
     }
 
     [Fact]
@@ -161,9 +197,10 @@ public sealed class EvaluationPipelineTests
                 AnswerEvaluationSet.ExpectedFacts)
         ]);
 
-        Assert.Equal(
-            ["The answer must contain at least one claim."],
-            Assert.Single(report.Results).FailureReasons);
+        var result = Assert.Single(report.Results);
+        Assert.Equal(["The answer must contain at least one claim."], result.FailureReasons);
+        Assert.Equal([EvaluationFailureCode.NoClaim], result.Failures.Select(failure => failure.Code).ToArray());
+        Assert.Equal([EvaluationFailureCategory.Other], result.FailureCategories);
     }
 
     [Theory]
@@ -181,7 +218,9 @@ public sealed class EvaluationPipelineTests
                 AnswerEvaluationSet.ExpectedFacts)
         ]);
 
-        Assert.Equal(["The answer is empty."], Assert.Single(report.Results).FailureReasons);
+        var result = Assert.Single(report.Results);
+        Assert.Equal(["The answer is empty."], result.FailureReasons);
+        Assert.Equal(EvaluationFailureCategory.EmptyAnswer, Assert.Single(result.FailureCategories));
     }
 
     [Fact]
@@ -289,7 +328,7 @@ public sealed class EvaluationPipelineTests
     [Fact]
     public void Report_rejects_a_pass_flag_that_disagrees_with_the_threshold()
     {
-        var result = new EvaluationCaseResult("Empty answer", false, ["The answer is empty."]);
+        var result = new EvaluationCaseResult("Empty answer", false, [EvaluationFailure.EmptyAnswer()]);
 
         var exception = Assert.Throws<ArgumentException>(
             () => new EvaluationReport(1, 0, 1, true, [result], EvaluationThresholds.Default));
@@ -305,6 +344,11 @@ public sealed class EvaluationPipelineTests
     private static EvaluationCaseResult Result(EvaluationReport report, string id)
     {
         return Assert.Single(report.Results, item => item.CaseId == id);
+    }
+
+    private static EvaluationFailureCode[] Codes(EvaluationReport report, string id)
+    {
+        return Result(report, id).Failures.Select(failure => failure.Code).ToArray();
     }
 
     private static EvaluationCase Create(

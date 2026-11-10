@@ -1,13 +1,18 @@
 public sealed record EvaluationCaseResult(
     string CaseId,
     bool Passed,
-    IReadOnlyList<string> FailureReasons)
+    IReadOnlyList<EvaluationFailure> Failures)
 {
     public string CaseId { get; init; } = RequireCaseId(CaseId);
 
-    public IReadOnlyList<string> FailureReasons { get; init; } = CopyReasons(FailureReasons);
+    public IReadOnlyList<EvaluationFailure> Failures { get; init; } = CopyFailures(Failures);
 
-    public bool Passed { get; init; } = RequirePassed(Passed, FailureReasons);
+    public bool Passed { get; init; } = RequirePassed(Passed, Failures);
+
+    public IReadOnlyList<string> FailureReasons => ReasonsFrom(Failures);
+
+    public IReadOnlyList<EvaluationFailureCategory> FailureCategories =>
+        EvaluationFailureClassifier.Classify(Failures);
 
     private static string RequireCaseId(string caseId)
     {
@@ -15,40 +20,45 @@ public sealed record EvaluationCaseResult(
         return caseId.Trim();
     }
 
-    private static IReadOnlyList<string> CopyReasons(IReadOnlyList<string> failureReasons)
+    private static IReadOnlyList<EvaluationFailure> CopyFailures(IReadOnlyList<EvaluationFailure> failures)
     {
-        ArgumentNullException.ThrowIfNull(failureReasons);
-        var copy = new string[failureReasons.Count];
-        for (var index = 0; index < failureReasons.Count; index++)
+        ArgumentNullException.ThrowIfNull(failures);
+        var copy = new EvaluationFailure[failures.Count];
+        for (var index = 0; index < failures.Count; index++)
         {
-            var reason = failureReasons[index];
-            if (string.IsNullOrWhiteSpace(reason))
-            {
-                throw new ArgumentException(
-                    "Failure reasons cannot contain null or blank values.",
-                    nameof(failureReasons));
-            }
-
-            copy[index] = reason.Trim();
+            copy[index] = failures[index] ?? throw new ArgumentException(
+                "Failures cannot contain null values.",
+                nameof(failures));
         }
 
         return copy;
     }
 
-    private static bool RequirePassed(bool passed, IReadOnlyList<string> failureReasons)
+    private static string[] ReasonsFrom(IReadOnlyList<EvaluationFailure> failures)
     {
-        ArgumentNullException.ThrowIfNull(failureReasons);
-        var hasReason = false;
-        foreach (var reason in failureReasons)
+        var reasons = new string[failures.Count];
+        for (var index = 0; index < failures.Count; index++)
         {
-            if (!string.IsNullOrWhiteSpace(reason))
+            reasons[index] = failures[index].Reason;
+        }
+
+        return reasons;
+    }
+
+    private static bool RequirePassed(bool passed, IReadOnlyList<EvaluationFailure> failures)
+    {
+        ArgumentNullException.ThrowIfNull(failures);
+        var hasFailure = false;
+        foreach (var failure in failures)
+        {
+            if (failure is not null)
             {
-                hasReason = true;
+                hasFailure = true;
                 break;
             }
         }
 
-        if (passed == hasReason)
+        if (passed == hasFailure)
         {
             throw new ArgumentException(
                 "Passed must be true only when there are no failure reasons.",
