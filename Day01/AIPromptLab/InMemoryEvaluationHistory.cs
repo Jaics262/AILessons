@@ -64,6 +64,7 @@ public sealed class InMemoryEvaluationHistory
             snapshot.TotalCases,
             snapshot.FailedCases,
             snapshot.FailureRate,
-            snapshot.CategoryCounts);
+            snapshot.CategoryCounts,
+            snapshot.CaseIds);
     }
 }

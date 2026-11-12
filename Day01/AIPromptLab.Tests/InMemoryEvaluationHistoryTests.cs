@@ -134,6 +134,29 @@ public sealed class InMemoryEvaluationHistoryTests
     }
 
     [Fact]
+    public void Add_keeps_case_ids_when_the_original_list_changes()
+    {
+        var caseIds = new List<string> { "alpha", "beta" };
+        var snapshot = new EvaluationSnapshot(
+            "run-1",
+            At(9, 0, TimeSpan.Zero),
+            2,
+            0,
+            0d,
+            Counts(),
+            caseIds);
+        var store = new InMemoryEvaluationHistory();
+        store.Add(snapshot);
+        caseIds[0] = "changed";
+
+        var stored = store.Find("run-1");
+
+        Assert.NotNull(stored);
+        Assert.Equal(["alpha", "beta"], stored.CaseIds);
+        Assert.Equal(["alpha", "beta"], Assert.Single(store.Retrieve()).CaseIds);
+    }
+
+    [Fact]
     public void Find_rejects_a_blank_run_id()
     {
         var store = new InMemoryEvaluationHistory();

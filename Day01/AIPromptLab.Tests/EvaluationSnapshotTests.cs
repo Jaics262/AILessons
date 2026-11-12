@@ -23,6 +23,9 @@ public sealed class EvaluationSnapshotTests
         Assert.Equal((double)4 / 6 * 100d, snapshot.FailureRate);
         Assert.Equal(analysis.CategoryCounts.ToArray(), snapshot.CategoryCounts.ToArray());
         Assert.NotSame(analysis.CategoryCounts, snapshot.CategoryCounts);
+        Assert.Equal(
+            AnswerEvaluationSet.PipelineCases.Select(item => item.Id).ToArray(),
+            snapshot.CaseIds);
     }
 
     [Fact]
@@ -134,6 +137,35 @@ public sealed class EvaluationSnapshotTests
         Assert.Equal(1, snapshot.TotalCases);
         Assert.Equal(1, snapshot.FailedCases);
         Assert.Equal(100d, snapshot.FailureRate);
+    }
+
+    [Fact]
+    public void Constructor_copies_case_ids()
+    {
+        var caseIds = new List<string> { " alpha ", "beta" };
+
+        var snapshot = new EvaluationSnapshot("run-1", EvaluatedAt, 2, 0, 0d, Counts(), caseIds);
+        caseIds[0] = "changed";
+        caseIds.Add("gamma");
+
+        Assert.Equal(["alpha", "beta"], snapshot.CaseIds);
+        Assert.NotSame(caseIds, snapshot.CaseIds);
+    }
+
+    [Fact]
+    public void Constructor_rejects_case_ids_that_do_not_match_the_dataset()
+    {
+        var count = Assert.Throws<ArgumentException>(
+            () => new EvaluationSnapshot("run-1", EvaluatedAt, 2, 0, 0d, Counts(), ["only-one"]));
+        var blank = Assert.Throws<ArgumentException>(
+            () => new EvaluationSnapshot("run-1", EvaluatedAt, 1, 0, 0d, Counts(), [" "]));
+        var duplicate = Assert.Throws<ArgumentException>(
+            () => new EvaluationSnapshot("run-1", EvaluatedAt, 2, 0, 0d, Counts(), ["same", "same"]));
+
+        Assert.Equal("caseIds", count.ParamName);
+        Assert.Equal("caseIds", blank.ParamName);
+        Assert.Equal("caseIds", duplicate.ParamName);
+        Assert.Contains("same", duplicate.Message, StringComparison.Ordinal);
     }
 
     [Fact]

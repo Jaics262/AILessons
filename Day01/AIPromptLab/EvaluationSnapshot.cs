@@ -2,18 +2,23 @@
 // Totals, the failure rate, and category counts come from the report's failure analysis.
 // Those counts are copied, so a later change to the report or the source dictionary leaves this run unchanged.
 // The failure rate stays the analysis percentage: failed / total × 100. An empty run keeps 0.
+// CaseIds is the evaluation dataset in result order. Null means this run did not record its cases.
+// A recorded list has one id per case. The regression gate uses it to see whether two runs scored the same dataset.
 public sealed record EvaluationSnapshot(
     string RunId,
     DateTimeOffset EvaluatedAt,
     int TotalCases,
     int FailedCases,
     double FailureRate,
-    IReadOnlyDictionary<EvaluationFailureCategory, int> CategoryCounts)
+    IReadOnlyDictionary<EvaluationFailureCategory, int> CategoryCounts,
+    IReadOnlyList<string>? CaseIds = null)
 {
     public string RunId { get; init; } = RequireRunId(RunId);
 
     public IReadOnlyDictionary<EvaluationFailureCategory, int> CategoryCounts { get; init; } =
         ValidatedCounts(TotalCases, FailedCases, FailureRate, CategoryCounts);
+
+    public IReadOnlyList<string>? CaseIds { get; init; } = CopyCaseIds(CaseIds, TotalCases);
 
     public static EvaluationSnapshot Capture(
         string runId,
@@ -22,13 +27,20 @@ public sealed record EvaluationSnapshot(
     {
         ArgumentNullException.ThrowIfNull(report);
         var analysis = EvaluationFailureAnalyzer.Analyze(report);
+        var caseIds = new string[report.Results.Count];
+        for (var index = 0; index < report.Results.Count; index++)
+        {
+            caseIds[index] = report.Results[index].CaseId;
+        }
+
         return new EvaluationSnapshot(
             runId,
             evaluatedAt,
             analysis.TotalCases,
             analysis.FailedCases,
             analysis.FailureRate,
-            analysis.CategoryCounts);
+            analysis.CategoryCounts,
+            caseIds);
     }
 
     private static string RequireRunId(string runId)
@@ -69,5 +81,45 @@ public sealed record EvaluationSnapshot(
         }
 
         return EvaluationFailureAnalysis.Leader(categoryCounts);
+    }
+
+    private static IReadOnlyList<string>? CopyCaseIds(IReadOnlyList<string>? caseIds, int totalCases)
+    {
+        if (caseIds is null)
+        {
+            return null;
+        }
+
+        if (caseIds.Count != totalCases)
+        {
+            throw new ArgumentException(
+                "Case ids must have one entry for each case.",
+                nameof(caseIds));
+        }
+
+        var copy = new string[caseIds.Count];
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < caseIds.Count; index++)
+        {
+            var caseId = caseIds[index];
+            if (string.IsNullOrWhiteSpace(caseId))
+            {
+                throw new ArgumentException(
+                    "Case ids cannot contain null or blank values.",
+                    nameof(caseIds));
+            }
+
+            var trimmed = caseId.Trim();
+            if (!seen.Add(trimmed))
+            {
+                throw new ArgumentException(
+                    $"The case '{trimmed}' is listed more than once.",
+                    nameof(caseIds));
+            }
+
+            copy[index] = trimmed;
+        }
+
+        return copy;
     }
 }

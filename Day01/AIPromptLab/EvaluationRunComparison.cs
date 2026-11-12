@@ -158,7 +158,8 @@ public sealed class EvaluationRunComparison
             snapshot.TotalCases,
             snapshot.FailedCases,
             snapshot.FailureRate,
-            snapshot.CategoryCounts);
+            snapshot.CategoryCounts,
+            snapshot.CaseIds);
     }
 
     private static Dictionary<EvaluationFailureCategory, int> Freeze(EvaluationSnapshot snapshot)
