@@ -132,48 +132,42 @@ public sealed class EvaluationRegressionGateTests
         var comparison = result.Comparison;
         Assert.NotNull(comparison);
         Assert.True(comparison.DatasetSizeChanged);
-        Assert.Equal(0d, comparison.FailureRateChange);
         Assert.False(result.Passed);
         Assert.Equal(
             ["The dataset size changed from 20 to 10 cases. These runs are not the same fixed evaluation dataset."],
             result.FailureReasons);
+        Assert.DoesNotContain("Failure rate:", result.Report, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Gate_reports_the_size_change_and_the_rate_regression_together()
+    public void Gate_rejects_different_case_ids_even_when_the_count_matches()
     {
-        var result = EvaluationRegressionGate.Evaluate(
-            Snapshot("baseline", 20, 0),
-            Snapshot("candidate", 10, 1, ungrounded: 1),
-            EvaluationRegressionPolicy.Default);
-
-        Assert.Equal(10d, result.Comparison!.FailureRateChange);
-        Assert.Equal(1, result.Comparison.FailedCaseChange);
-        Assert.False(result.Passed);
-        Assert.Equal(
-            [
-                "The dataset size changed from 20 to 10 cases. These runs are not the same fixed evaluation dataset.",
-                "The failure rate regressed by 10 percentage points, from 0% to 10%. The limit is 5 percentage points.",
-                "Ungrounded-claim failures increased by 1, from 0 to 1. The limit is 0."
-            ],
-            result.FailureReasons);
-    }
-
-    [Fact]
-    public void Gate_fails_when_the_same_count_uses_different_cases()
-    {
-        var result = EvaluationRegressionGate.Evaluate(
+        var regressed = EvaluationRegressionGate.Evaluate(
             Snapshot("baseline", 2, 0, caseIds: ["alpha", "beta"]),
+            Snapshot("candidate", 2, 1, ungrounded: 1, caseIds: ["alpha", "gamma"]),
+            EvaluationRegressionPolicy.Default);
+        var improved = EvaluationRegressionGate.Evaluate(
+            Snapshot("baseline", 2, 1, ungrounded: 1, caseIds: ["alpha", "beta"]),
             Snapshot("candidate", 2, 0, caseIds: ["alpha", "gamma"]),
             EvaluationRegressionPolicy.Default);
 
-        Assert.Equal(0d, result.Comparison!.FailureRateChange);
-        Assert.False(result.Comparison.DatasetSizeChanged);
-        Assert.False(result.Passed);
+        Assert.False(regressed.Comparison!.DatasetSizeChanged);
+        Assert.Equal(50d, regressed.Comparison.FailureRateChange);
+        Assert.Equal(EvaluationRateDirection.Worsened, regressed.Comparison.Direction);
+        Assert.False(regressed.Passed);
         Assert.Equal(
             ["The evaluation cases changed from 'alpha', 'beta' to 'alpha', 'gamma'. These runs are not the same fixed evaluation dataset."],
-            result.FailureReasons);
-        Assert.Contains("different evaluation cases", result.Report, StringComparison.Ordinal);
+            regressed.FailureReasons);
+        Assert.Contains("different evaluation cases", regressed.Report, StringComparison.Ordinal);
+        Assert.DoesNotContain("Failure rate:", regressed.Report, StringComparison.Ordinal);
+        Assert.DoesNotContain("percentage points", regressed.Report, StringComparison.Ordinal);
+
+        Assert.False(improved.Comparison!.DatasetSizeChanged);
+        Assert.Equal(-50d, improved.Comparison.FailureRateChange);
+        Assert.Equal(EvaluationRateDirection.Improved, improved.Comparison.Direction);
+        Assert.False(improved.Passed);
+        Assert.Equal(regressed.FailureReasons, improved.FailureReasons);
+        Assert.DoesNotContain("Failure rate:", improved.Report, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,7 +220,7 @@ public sealed class EvaluationRegressionGateTests
     }
 
     [Fact]
-    public void Gate_rejects_a_smaller_dataset_when_its_failure_rate_improves()
+    public void Gate_rejects_a_smaller_case_set_from_the_fixed_dataset()
     {
         var baseline = EvaluationSnapshot.Capture(
             "baseline",
@@ -241,8 +235,8 @@ public sealed class EvaluationRegressionGateTests
 
         var result = EvaluationRegressionGate.Evaluate(baseline, candidate, EvaluationRegressionPolicy.Default);
 
-        Assert.True(result.Comparison!.FailureRateChange < 0d);
         Assert.False(result.Passed);
+        Assert.DoesNotContain("Failure rate:", result.Report, StringComparison.Ordinal);
         Assert.Equal(
             [
                 "The dataset size changed from 6 to 1 cases. These runs are not the same fixed evaluation dataset.",

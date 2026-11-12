@@ -38,16 +38,20 @@ public sealed class EvaluationRegressionResult
             }
 
             lines.Add(DatasetLine());
-            lines.Add(
-                $"Failure rate: {FormatRate(Comparison.Previous.FailureRate)} -> {FormatRate(Comparison.Latest.FailureRate)} " +
-                $"(change {FormatPoints(Comparison.FailureRateChange)} percentage points, " +
-                $"limit {FormatPoints(Policy.MaximumFailureRateRegression)})");
-            lines.Add(CategoryLine(
-                EvaluationFailureCategory.UngroundedClaim,
-                Policy.MaximumUngroundedClaimIncrease));
-            lines.Add(CategoryLine(
-                EvaluationFailureCategory.MissingExpectedFact,
-                Policy.MaximumMissingExpectedFactIncrease));
+            if (DatasetMatches())
+            {
+                lines.Add(
+                    $"Failure rate: {FormatRate(Comparison.Previous.FailureRate)} -> {FormatRate(Comparison.Latest.FailureRate)} " +
+                    $"(change {FormatPoints(Comparison.FailureRateChange)} percentage points, " +
+                    $"limit {FormatPoints(Policy.MaximumFailureRateRegression)})");
+                lines.Add(CategoryLine(
+                    EvaluationFailureCategory.UngroundedClaim,
+                    Policy.MaximumUngroundedClaimIncrease));
+                lines.Add(CategoryLine(
+                    EvaluationFailureCategory.MissingExpectedFact,
+                    Policy.MaximumMissingExpectedFactIncrease));
+            }
+
             AppendReasons(lines);
             return string.Join('\n', lines);
         }
@@ -101,6 +105,28 @@ public sealed class EvaluationRegressionResult
         return line + (SameCases(baseline.CaseIds, candidate.CaseIds)
             ? ", same evaluation cases"
             : ", different evaluation cases");
+    }
+
+    private bool DatasetMatches()
+    {
+        var baseline = Comparison!.Previous;
+        var candidate = Comparison.Latest;
+        if (baseline.TotalCases != candidate.TotalCases)
+        {
+            return false;
+        }
+
+        if (baseline.CaseIds is null && candidate.CaseIds is null)
+        {
+            return true;
+        }
+
+        if (baseline.CaseIds is null || candidate.CaseIds is null)
+        {
+            return false;
+        }
+
+        return SameCases(baseline.CaseIds, candidate.CaseIds);
     }
 
     private string CategoryLine(EvaluationFailureCategory category, int limit)

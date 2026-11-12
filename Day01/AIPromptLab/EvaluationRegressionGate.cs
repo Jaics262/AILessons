@@ -3,9 +3,9 @@ using System.Globalization;
 // Compares a candidate evaluation run with a baseline and applies EvaluationRegressionPolicy.
 // Regression is the candidate failure rate minus the baseline failure rate, in percentage points.
 // The result passes only when the dataset matches and every policy rule holds.
-// A different case count is not the same fixed dataset. When either run recorded its cases,
-// a different case list is not the same dataset either.
-// Those pairs still report rate and category misses. The first miss does not hide later ones.
+// A different case count, or a different case-id set, is not the same fixed dataset.
+// The gate stops on that mismatch. A failure-rate or category change across different cases
+// is not a regression result, because the runs did not score the same cases.
 public static class EvaluationRegressionGate
 {
     public static EvaluationRegressionResult Evaluate(
@@ -37,6 +37,11 @@ public static class EvaluationRegressionGate
 
         var comparison = EvaluationRunComparer.Compare(baseline, candidate);
         AddDatasetReasons(reasons, comparison);
+        if (reasons.Count > 0)
+        {
+            return EvaluationRegressionResult.From(policy, comparison, reasons);
+        }
+
         if (!policy.AllowsFailureRate(comparison))
         {
             reasons.Add(RateReason(comparison, policy));
