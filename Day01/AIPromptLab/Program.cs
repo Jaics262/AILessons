@@ -5,6 +5,12 @@ using Microsoft.Extensions.Logging;
 using Serilog;
 using Serilog.Events;
 
+// A CI run compares two saved snapshots and exits. It does not start the prompt loop.
+if (EvaluationRegressionGateRunner.IsInvocation(args))
+{
+    return EvaluationRegressionGateRunner.Run(args);
+}
+
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Warning()
     .WriteTo.File(
@@ -32,12 +38,14 @@ try
     using var host = builder.Build();
     _ = host.Services.GetRequiredService<GeminiLlmClient>();
     await host.RunAsync();
+    return Environment.ExitCode;
 }
 catch (InvalidOperationException ex)
 {
     Log.Error(ex, "Conversation history could not be created.");
     Console.Error.WriteLine(ex.Message);
     Environment.ExitCode = 1;
+    return 1;
 }
 catch (GeminiClientException ex)
 {
@@ -45,12 +53,14 @@ catch (GeminiClientException ex)
     Console.Error.WriteLine();
     Console.Error.WriteLine(PromptLabErrors.Describe(ex));
     Environment.ExitCode = 1;
+    return 1;
 }
 catch (Exception ex)
 {
     Log.Error(ex, "Something went wrong while contacting the API.");
     Console.Error.WriteLine("Something went wrong while contacting the API. Try again.");
     Environment.ExitCode = 1;
+    return 1;
 }
 finally
 {

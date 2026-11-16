@@ -1,0 +1,13 @@
+{
+    "runId": "failing",
+    "evaluatedAt": "2026-11-12T18:00:00+00:00",
+    "totalCases": 100,
+    "failedCases": 16,
+    "failureRate": 16,
+    "categoryCounts": {
+      "UngroundedClaim": 0,
+      "MissingExpectedFact": 0,
+      "EmptyAnswer": 0,
+      "Other": 16
+    }
+  }
