@@ -38,7 +38,7 @@ jobs:
         id: gate
         run: |
           set +e
-          dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- regression-gate --baseline Day01/AIPromptLab/Evaluation/snapshots/baseline.json --candidate Day01/AIPromptLab/Evaluation/snapshots/failing.json --report reports/quality.json
+          dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- regression-gate --baseline Day01/AIPromptLab/Evaluation/snapshots/baseline.json --candidate Day01/AIPromptLab/Evaluation/snapshots/passing.json --report reports/quality.json
           code=$?
           echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
           exit "$code"
