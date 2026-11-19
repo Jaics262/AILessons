@@ -5,10 +5,17 @@ using Microsoft.Extensions.Logging;
 using Serilog;
 using Serilog.Events;
 
-// A CI run compares two saved snapshots and exits. It does not start the prompt loop.
+// A CI run compares two saved snapshots, or writes the markdown summary, and exits.
+// It does not start the prompt loop. quality-summary reads the saved JSON report.
+// It does not run the regression gate.
 if (EvaluationRegressionGateRunner.IsInvocation(args))
 {
     return EvaluationRegressionGateRunner.Run(args);
+}
+
+if (EvaluationQualitySummaryRunner.IsInvocation(args))
+{
+    return EvaluationQualitySummaryRunner.Run(args);
 }
 
 Log.Logger = new LoggerConfiguration()
