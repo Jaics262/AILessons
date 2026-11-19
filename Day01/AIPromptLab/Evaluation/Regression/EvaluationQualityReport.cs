@@ -95,6 +95,29 @@ public sealed class EvaluationQualityReport
             EvaluationRegressionGateRunner.InvalidSnapshotExitCode);
     }
 
+    // Stores one saved quality report. This does not run the regression gate or apply its policy.
+    // The stored fields still have to agree: status matches the exit code, and reasons belong only to a failure.
+    public static EvaluationQualityReport FromStored(
+        string status,
+        int? baselineCaseCount,
+        int? candidateCaseCount,
+        double? baselineFailureRate,
+        double? candidateFailureRate,
+        double? failureRateChangePercentagePoints,
+        IReadOnlyList<string> failureReasons,
+        int exitCode)
+    {
+        return new EvaluationQualityReport(
+            status,
+            baselineCaseCount,
+            candidateCaseCount,
+            baselineFailureRate,
+            candidateFailureRate,
+            failureRateChangePercentagePoints,
+            CopyReasons(failureReasons),
+            exitCode);
+    }
+
     private static string RequireStatus(string status)
     {
         if (status is not (PassedStatus or FailedStatus))

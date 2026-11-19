@@ -7,6 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# checkout needs contents read. Pull request comments need pull-requests write.
+# Artifact upload uses the runner's artifact token, not another GITHUB_TOKEN scope.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,13 +35,80 @@ jobs:
         run: dotnet test Day01/AIPromptLab.Tests/AIPromptLab.Tests.csproj --no-build --verbosity normal
 
       - name: Regression gate
-        run: dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- regression-gate --baseline Day01/AIPromptLab/Evaluation/snapshots/baseline.json --candidate Day01/AIPromptLab/Evaluation/snapshots/passing.json --report reports/quality.json
+        id: gate
+        run: |
+          set +e
+          dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- regression-gate --baseline Day01/AIPromptLab/Evaluation/snapshots/baseline.json --candidate Day01/AIPromptLab/Evaluation/snapshots/passing.json --report reports/quality.json
+          code=$?
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      # Read the JSON report the gate just wrote.
+      - name: Quality summary
+        if: ${{ !cancelled() && hashFiles('Day01/AIPromptLab/reports/quality.json') != '' }}
+        run: dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- quality-summary --report reports/quality.json --output reports/quality-summary.md
+
+      - name: Publish quality summary
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && hashFiles('Day01/AIPromptLab/reports/quality.json') != '' }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ai-quality-gate-report -->';
+            const summaryPath = 'Day01/AIPromptLab/reports/quality-summary.md';
+            if (!fs.existsSync(summaryPath)) {
+              core.setFailed(`The quality summary '${summaryPath}' was not found.`);
+              return;
+            }
+
+            const summary = fs.readFileSync(summaryPath, 'utf8').trim();
+            const body = `${marker}\n\n${summary}\n`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated quality summary comment ${existing.id}.`);
+              return;
+            }
+
+            const created = await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body,
+            });
+            core.info(`Created quality summary comment ${created.data.id}.`);
 
       - name: Upload quality report
         uses: actions/upload-artifact@v6
         with:
           name: quality-report
-          path: Day01/AIPromptLab/reports/quality.json
+          path: |
+            Day01/AIPromptLab/reports/quality.json
+            Day01/AIPromptLab/reports/quality-summary.md
           if-no-files-found: error
-        # Use always() to publish the report when the regression gate fails.
-        if: ${{ always() }}
+        # Publish the report when the regression gate fails. Skip a cancelled run.
+        if: ${{ !cancelled() }}
+
+      # The gate step already exited with this code. Repeat it after the comment
+      # and upload so a non-zero regression-gate result remains the job result.
+      - name: Regression gate result
+        if: ${{ !cancelled() && steps.gate.outputs.exit_code != '' }}
+        env:
+          GATE_EXIT_CODE: ${{ steps.gate.outputs.exit_code }}
+        run: exit "$GATE_EXIT_CODE"
