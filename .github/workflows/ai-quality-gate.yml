@@ -34,11 +34,12 @@ jobs:
       - name: Test
         run: dotnet test Day01/AIPromptLab.Tests/AIPromptLab.Tests.csproj --no-build --verbosity normal
 
+      # Snapshot and policy paths are from the repo root. --report is resolved from the project directory.
       - name: Regression gate
         id: gate
         run: |
           set +e
-          dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- regression-gate --baseline Day01/AIPromptLab/Evaluation/snapshots/baseline.json --candidate Day01/AIPromptLab/Evaluation/snapshots/passing.json --report reports/quality.json
+          dotnet run --project Day01/AIPromptLab/AIPromptLab.csproj --no-build -- regression-gate --baseline Day01/AIPromptLab/Evaluation/snapshots/baseline.json --candidate Day01/AIPromptLab/Evaluation/snapshots/passing.json --policy Day01/AIPromptLab/Evaluation/quality-gate-policy.json --report reports/quality.json
           code=$?
           echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
           exit "$code"

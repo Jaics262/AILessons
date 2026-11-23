@@ -120,6 +120,25 @@ public sealed class EvaluationQualityReportTests
     }
 
     [Fact]
+    public void Invalid_input_records_loaded_snapshots_without_a_gate_comparison()
+    {
+        var baseline = Snapshot("baseline", 100, 10, other: 10);
+        var candidate = Snapshot("candidate", 100, 15, other: 15);
+        var reason = "The policy file 'policy.json' is not valid. 'maxFailureRateRegressionPercentagePoints' must be a non-negative number.";
+
+        var report = EvaluationQualityReport.FromInvalidInput(baseline, candidate, [reason]);
+
+        Assert.Equal(EvaluationQualityReport.FailedStatus, report.Status);
+        Assert.Equal(100, report.BaselineCaseCount);
+        Assert.Equal(10d, report.BaselineFailureRate);
+        Assert.Equal(100, report.CandidateCaseCount);
+        Assert.Equal(15d, report.CandidateFailureRate);
+        Assert.Null(report.FailureRateChangePercentagePoints);
+        Assert.Equal([reason], report.FailureReasons);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, report.ExitCode);
+    }
+
+    [Fact]
     public void Snapshot_load_failure_does_not_replace_the_gate()
     {
         var baseline = Snapshot("baseline", 2, 0, caseIds: ["alpha", "beta"]);

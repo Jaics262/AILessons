@@ -431,7 +431,7 @@ public sealed class EvaluationRegressionGateRunnerTests
             "baseline.json",
             "--candidate",
             "candidate.json",
-            "--policy",
+            "--threshold",
             "loose");
         var repeated = ExecuteCommand(
             "regression-gate",
@@ -444,7 +444,7 @@ public sealed class EvaluationRegressionGateRunnerTests
         var omitted = ExecuteCommand("regression-gate", "--candidate");
 
         Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, unknown.ExitCode);
-        Assert.Contains("Unknown argument '--policy'.", unknown.Error, StringComparison.Ordinal);
+        Assert.Contains("Unknown argument '--threshold'.", unknown.Error, StringComparison.Ordinal);
         Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, repeated.ExitCode);
         Assert.Contains("more than once", repeated.Error, StringComparison.Ordinal);
         Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, omitted.ExitCode);
@@ -452,6 +452,297 @@ public sealed class EvaluationRegressionGateRunnerTests
         Assert.Equal(string.Empty, unknown.Output);
         Assert.Equal(string.Empty, repeated.Output);
         Assert.Equal(string.Empty, omitted.Output);
+    }
+
+    [Fact]
+    public void Command_line_loads_the_policy_file_and_sends_it_to_the_gate()
+    {
+        var baseline = Snapshot("baseline", 100, 10, other: 10);
+        var candidate = Snapshot("failing", 100, 16, other: 16);
+        var policy = new EvaluationRegressionPolicy(6d, 0, 1);
+        using var files = new TempSnapshots();
+        var baselinePath = files.WriteRaw("baseline.json", BaselineJson);
+        var candidatePath = files.WriteRaw("failing.json", FailingJson);
+        var policyPath = files.WriteRaw("policy.json", PolicyJson(6, 0, 1));
+
+        var spaced = ExecuteCommand(
+            "regression-gate",
+            "--candidate",
+            candidatePath,
+            "--policy",
+            policyPath,
+            "--baseline",
+            baselinePath);
+        var equals = ExecuteCommand(
+            "Regression-Gate",
+            "--baseline=" + baselinePath,
+            "--policy=" + policyPath,
+            "--candidate=" + candidatePath);
+        var expected = EvaluationRegressionGate.Evaluate(baseline, candidate, policy);
+        var blocked = EvaluationRegressionGate.Evaluate(
+            baseline,
+            candidate,
+            EvaluationRegressionPolicy.Default);
+
+        Assert.True(expected.Passed);
+        Assert.False(blocked.Passed);
+        AssertReport(expected, spaced.ExitCode, spaced.Output, spaced.Error);
+        AssertReport(expected, equals.ExitCode, equals.Output, equals.Error);
+    }
+
+    [Fact]
+    public void Command_line_keeps_the_default_policy_when_the_policy_file_is_omitted()
+    {
+        var baseline = Snapshot("baseline", 100, 10, other: 10);
+        var candidate = Snapshot("failing", 100, 16, other: 16);
+        using var files = new TempSnapshots();
+
+        var (code, output, error) = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            files.WriteRaw("baseline.json", BaselineJson),
+            "--candidate",
+            files.WriteRaw("failing.json", FailingJson));
+        var expected = EvaluationRegressionGate.Evaluate(
+            baseline,
+            candidate,
+            EvaluationRegressionPolicy.Default);
+
+        Assert.False(expected.Passed);
+        Assert.Equal(EvaluationRegressionGateRunner.FailedExitCode, code);
+        AssertReport(expected, code, output, error);
+    }
+
+    [Fact]
+    public void Command_line_returns_two_when_the_policy_file_is_missing_or_invalid()
+    {
+        using var files = new TempSnapshots();
+        var baselinePath = files.WriteRaw("baseline.json", BaselineJson);
+        var candidatePath = files.WriteRaw("passing.json", PassingJson);
+        var missing = files.PathOf("missing-policy.json");
+        var invalid = files.WriteRaw("invalid.json", "{");
+        var negative = files.WriteRaw("negative.json", PolicyJson(-1, 0, 1));
+        var fractional = files.WriteRaw(
+            "fractional.json",
+            """
+            {
+              "maxFailureRateRegressionPercentagePoints": 5,
+              "maxAdditionalUngroundedClaimFailures": 1.5,
+              "maxAdditionalMissingExpectedFactFailures": 1
+            }
+            """);
+        var incomplete = files.WriteRaw(
+            "incomplete.json",
+            """
+            {
+              "maxFailureRateRegressionPercentagePoints": 5
+            }
+            """);
+        var unknownField = files.WriteRaw(
+            "unknown.json",
+            """
+            {
+              "maxFailureRateRegressionPercentagePoints": 5,
+              "maxAdditionalUngroundedClaimFailures": 0,
+              "maxAdditionalMissingExpectedFactFailures": 1,
+              "extra": true
+            }
+            """);
+
+        var missingResult = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            missing);
+        var invalidResult = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            invalid);
+        var negativeResult = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            negative);
+        var fractionalResult = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            fractional);
+        var incompleteResult = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            incomplete);
+        var unknownResult = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            unknownField);
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, missingResult.ExitCode);
+        Assert.Contains($"The policy file '{missing}' was not found.", missingResult.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, invalidResult.ExitCode);
+        Assert.Contains($"The policy file '{invalid}' is not valid.", invalidResult.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, negativeResult.ExitCode);
+        Assert.Contains(
+            "'maxFailureRateRegressionPercentagePoints' must be a non-negative number.",
+            negativeResult.Error,
+            StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, fractionalResult.ExitCode);
+        Assert.Contains(
+            "'maxAdditionalUngroundedClaimFailures' must be an integer.",
+            fractionalResult.Error,
+            StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, incompleteResult.ExitCode);
+        Assert.Contains(
+            "The quality gate policy is missing 'maxAdditionalUngroundedClaimFailures'.",
+            incompleteResult.Error,
+            StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, unknownResult.ExitCode);
+        Assert.Contains(
+            "The quality gate policy property 'extra' is not recognized.",
+            unknownResult.Error,
+            StringComparison.Ordinal);
+        Assert.Equal(string.Empty, missingResult.Output);
+        Assert.Equal(string.Empty, invalidResult.Output);
+        Assert.Equal(string.Empty, negativeResult.Output);
+        Assert.Equal(string.Empty, fractionalResult.Output);
+        Assert.Equal(string.Empty, incompleteResult.Output);
+        Assert.Equal(string.Empty, unknownResult.Output);
+        Assert.DoesNotContain("Regression gate:", missingResult.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Command_line_returns_two_for_a_missing_or_repeated_policy_path()
+    {
+        using var files = new TempSnapshots();
+        var baselinePath = files.WriteRaw("baseline.json", BaselineJson);
+        var candidatePath = files.WriteRaw("passing.json", PassingJson);
+        var omitted = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy");
+        var blank = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy=");
+        var repeated = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--policy",
+            "one.json",
+            "--candidate",
+            candidatePath,
+            "--policy",
+            "two.json");
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, omitted.ExitCode);
+        Assert.Contains("The --policy file was not provided.", omitted.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, blank.ExitCode);
+        Assert.Contains("The --policy file was not provided.", blank.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, repeated.ExitCode);
+        Assert.Contains("The --policy option was provided more than once.", repeated.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", omitted.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", blank.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", repeated.Error, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, omitted.Output);
+        Assert.Equal(string.Empty, blank.Output);
+        Assert.Equal(string.Empty, repeated.Output);
+    }
+
+    [Fact]
+    public void Command_line_writes_the_report_for_an_invalid_policy_without_running_the_gate()
+    {
+        var baseline = Snapshot("baseline", 100, 10, other: 10);
+        var candidate = Snapshot("passing", 100, 15, other: 15);
+        using var files = new TempSnapshots();
+        var baselinePath = files.WriteRaw("baseline.json", BaselineJson);
+        var candidatePath = files.WriteRaw("passing.json", PassingJson);
+        var policyPath = files.WriteRaw("policy.json", PolicyJson(-1, 0, 1));
+        var reportPath = files.PathOf("quality.json");
+
+        var (code, output, error) = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            baselinePath,
+            "--candidate",
+            candidatePath,
+            "--policy",
+            policyPath,
+            "--report",
+            reportPath);
+        var report = EvaluationQualityReportJson.Deserialize(File.ReadAllText(reportPath));
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, code);
+        Assert.Equal(string.Empty, output);
+        Assert.Contains("must be a non-negative number.", error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationQualityReport.FailedStatus, report.Status);
+        Assert.Equal(baseline.TotalCases, report.BaselineCaseCount);
+        Assert.Equal(baseline.FailureRate, report.BaselineFailureRate);
+        Assert.Equal(candidate.TotalCases, report.CandidateCaseCount);
+        Assert.Equal(candidate.FailureRate, report.CandidateFailureRate);
+        Assert.Null(report.FailureRateChangePercentagePoints);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, report.ExitCode);
+        Assert.Contains("must be a non-negative number.", report.FailureReasons[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Command_line_writes_the_gate_report_when_the_policy_file_fails_the_gate()
+    {
+        var baseline = Snapshot("baseline", 100, 10, other: 10);
+        var candidate = Snapshot("passing", 100, 15, other: 15);
+        var policy = new EvaluationRegressionPolicy(4d, 0, 1);
+        using var files = new TempSnapshots();
+        var reportPath = files.PathOf("quality.json");
+
+        var (code, output, error) = ExecuteCommand(
+            "regression-gate",
+            "--baseline",
+            files.WriteRaw("baseline.json", BaselineJson),
+            "--candidate",
+            files.WriteRaw("passing.json", PassingJson),
+            "--policy",
+            files.WriteRaw("policy.json", PolicyJson(4, 0, 1)),
+            "--report",
+            reportPath);
+        var expected = EvaluationRegressionGate.Evaluate(baseline, candidate, policy);
+        var report = EvaluationQualityReportJson.Deserialize(File.ReadAllText(reportPath));
+        var expectedReport = EvaluationQualityReport.From(expected);
+
+        Assert.False(expected.Passed);
+        Assert.Equal(EvaluationRegressionGateRunner.FailedExitCode, code);
+        Assert.Equal(expected.Report + Environment.NewLine, output);
+        Assert.Equal(string.Empty, error);
+        Assert.Equal(expectedReport.Status, report.Status);
+        Assert.Equal(expectedReport.FailureRateChangePercentagePoints, report.FailureRateChangePercentagePoints);
+        Assert.Equal(expectedReport.FailureReasons, report.FailureReasons);
+        Assert.Equal(expectedReport.ExitCode, report.ExitCode);
     }
 
     [Fact]
@@ -495,6 +786,14 @@ public sealed class EvaluationRegressionGateRunnerTests
         Assert.DoesNotContain("caseIds", json, StringComparison.Ordinal);
         Assert.Null(EvaluationSnapshotJson.Deserialize(json).CaseIds);
     }
+
+    private static string PolicyJson(double failureRate, int ungrounded, int missing) =>
+        string.Join('\n',
+            "{",
+            $"  \"maxFailureRateRegressionPercentagePoints\": {failureRate.ToString(System.Globalization.CultureInfo.InvariantCulture)},",
+            $"  \"maxAdditionalUngroundedClaimFailures\": {ungrounded.ToString(System.Globalization.CultureInfo.InvariantCulture)},",
+            $"  \"maxAdditionalMissingExpectedFactFailures\": {missing.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
+            "}");
 
     private static (int ExitCode, string Output, string Error) Execute(
         string? baselinePath,
