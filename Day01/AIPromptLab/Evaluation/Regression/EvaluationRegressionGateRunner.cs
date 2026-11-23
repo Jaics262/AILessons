@@ -7,10 +7,16 @@ using System.Text.Json;
 // A missing or unreadable file stays 2. The gate does not see a snapshot that failed to load,
 // so a broken file is not reported as a quality regression.
 // File errors go to the error output. The gate report goes to the standard output.
-// The regression-gate command uses EvaluationRegressionPolicy.Default.
+// A command that omits --policy uses EvaluationRegressionPolicy.Default.
+// It does not read a policy file. The gate comparison for that command is unchanged.
+// --policy loads those limits from a JSON file and passes that policy to the same gate.
+// A policy path is used as given, the same way a snapshot path is used.
+// A missing policy file, invalid JSON, a missing field, or a negative limit exits 2.
+// The gate does not run on that input, so a broken policy is not a quality regression.
 // --report writes EvaluationQualityReport as JSON. The report copies the gate result.
 // It does not apply the policy again, and it has no timestamp.
 // A missing or invalid snapshot still has an outcome: status Failed, exit code 2, and the file error.
+// An invalid policy has the same outcome. Counts from a snapshot that did load are kept.
 // The report includes that outcome when a report path was given. A count or rate that was not loaded
 // is null, and the failure-rate change stays null because the gate did not run. The error output
 // still names the file. Exit code 2 does not change.
@@ -30,11 +36,13 @@ public static class EvaluationRegressionGateRunner
     public const int InvalidSnapshotExitCode = 2;
 
     public const string Usage =
-        $"Usage: {CommandName} --baseline <snapshot.json> --candidate <snapshot.json> [--report <report.json>]";
+        $"Usage: {CommandName} --baseline <snapshot.json> --candidate <snapshot.json> [--policy <policy.json>] [--report <report.json>]";
 
     private const string BaselineOption = "--baseline";
 
     private const string CandidateOption = "--candidate";
+
+    private const string PolicyOption = "--policy";
 
     private const string ReportOption = "--report";
 
@@ -45,13 +53,41 @@ public static class EvaluationRegressionGateRunner
     public static int Run(IReadOnlyList<string>? args, TextWriter? output = null, TextWriter? error = null)
     {
         error ??= Console.Error;
-        if (!TryParse(args, out var baselinePath, out var candidatePath, out var reportPath, out var parseError))
+        if (!TryParse(
+                args,
+                out var baselinePath,
+                out var candidatePath,
+                out var policyPath,
+                out var reportPath,
+                out var parseError))
         {
             error.WriteLine(parseError);
             return InvalidSnapshotExitCode;
         }
 
-        return Run(baselinePath, candidatePath, output, error, reportPath: reportPath);
+        if (policyPath is null)
+        {
+            return Run(baselinePath, candidatePath, output, error, reportPath: reportPath);
+        }
+
+        if (reportPath is not null && string.IsNullOrWhiteSpace(reportPath))
+        {
+            error.WriteLine($"The {ReportOption} file was not provided. {Usage}");
+            return InvalidSnapshotExitCode;
+        }
+
+        if (string.IsNullOrWhiteSpace(policyPath))
+        {
+            error.WriteLine($"The {PolicyOption} file was not provided. {Usage}");
+            return InvalidSnapshotExitCode;
+        }
+
+        if (!TryReadPolicy(policyPath, out var policy, out var policyError) || policy is null)
+        {
+            return FailInvalidPolicy(policyError, baselinePath, candidatePath, reportPath, error);
+        }
+
+        return Run(baselinePath, candidatePath, output, error, policy, reportPath: reportPath);
     }
 
     public static string ProjectDirectory()
@@ -154,11 +190,13 @@ public static class EvaluationRegressionGateRunner
         IReadOnlyList<string>? args,
         out string baselinePath,
         out string candidatePath,
+        out string? policyPath,
         out string? reportPath,
         out string error)
     {
         baselinePath = "";
         candidatePath = "";
+        policyPath = null;
         reportPath = null;
         if (!IsInvocation(args))
         {
@@ -169,6 +207,7 @@ public static class EvaluationRegressionGateRunner
         var arguments = args ?? [];
         string? baseline = null;
         string? candidate = null;
+        string? policy = null;
         string? report = null;
         for (var index = 1; index < arguments.Count; index++)
         {
@@ -186,6 +225,16 @@ public static class EvaluationRegressionGateRunner
             if (IsOption(argument, CandidateOption))
             {
                 if (!TryTakeOption(arguments, ref index, argument, CandidateOption, ref candidate, out error))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (IsOption(argument, PolicyOption))
+            {
+                if (!TryTakeOption(arguments, ref index, argument, PolicyOption, ref policy, out error))
                 {
                     return false;
                 }
@@ -215,6 +264,7 @@ public static class EvaluationRegressionGateRunner
 
         baselinePath = baseline;
         candidatePath = candidate;
+        policyPath = policy;
         reportPath = report;
         error = "";
         return true;
@@ -261,6 +311,7 @@ public static class EvaluationRegressionGateRunner
     private static bool IsKnownOption(string argument) =>
         IsOption(argument, BaselineOption) ||
         IsOption(argument, CandidateOption) ||
+        IsOption(argument, PolicyOption) ||
         IsOption(argument, ReportOption);
 
     private static string ResolveReportPath(string path, string? baseDirectory)
@@ -297,6 +348,76 @@ public static class EvaluationRegressionGateRunner
 
             error.WriteLine(message);
         }
+    }
+
+    private static int FailInvalidPolicy(
+        string policyError,
+        string baselinePath,
+        string candidatePath,
+        string? reportPath,
+        TextWriter error)
+    {
+        error.WriteLine(policyError);
+        var reasons = new List<string> { policyError };
+        var baselineReady = TryRead(baselinePath, "baseline", out var baseline, out var baselineError);
+        var candidateReady = TryRead(candidatePath, "candidate", out var candidate, out var candidateError);
+        if (!baselineReady)
+        {
+            error.WriteLine(baselineError);
+            reasons.Add(baselineError);
+        }
+
+        if (!candidateReady)
+        {
+            error.WriteLine(candidateError);
+            reasons.Add(candidateError);
+        }
+
+        if (reportPath is not null)
+        {
+            var reportDisplayPath = reportPath;
+            TryWriteReport(
+                ResolveReportPath(reportPath, null),
+                reportDisplayPath,
+                EvaluationQualityReport.FromInvalidInput(baseline, candidate, reasons),
+                error);
+        }
+
+        return InvalidSnapshotExitCode;
+    }
+
+    private static bool TryReadPolicy(string path, out EvaluationRegressionPolicy? policy, out string error)
+    {
+        policy = null;
+        string json;
+        try
+        {
+            json = File.ReadAllText(path);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            error = $"The policy file '{path}' was not found.";
+            return false;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+        {
+            error = $"The policy file '{path}' could not be read. {exception.Message}";
+            return false;
+        }
+
+        try
+        {
+            policy = EvaluationRegressionPolicyJson.Deserialize(json);
+        }
+        catch (JsonException exception)
+        {
+            error = $"The policy file '{path}' is not valid. {exception.Message}";
+            return false;
+        }
+
+        error = "";
+        return true;
     }
 
     private static bool TryRead(string? path, string role, out EvaluationSnapshot? snapshot, out string error)

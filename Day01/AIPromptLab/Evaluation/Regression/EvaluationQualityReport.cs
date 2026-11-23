@@ -84,6 +84,17 @@ public sealed class EvaluationQualityReport
                 nameof(candidate));
         }
 
+        return FromInvalidInput(baseline, candidate, failureReasons);
+    }
+
+    // Records an input failure without running the gate.
+    // Counts and rates are copied from any snapshot that loaded.
+    // The failure-rate change stays null because the gate did not compare the runs.
+    public static EvaluationQualityReport FromInvalidInput(
+        EvaluationSnapshot? baseline,
+        EvaluationSnapshot? candidate,
+        IReadOnlyList<string> failureReasons)
+    {
         return new EvaluationQualityReport(
             FailedStatus,
             baseline?.TotalCases,

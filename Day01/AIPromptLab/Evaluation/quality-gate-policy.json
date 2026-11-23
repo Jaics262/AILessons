@@ -1,0 +1,5 @@
+{
+  "maxFailureRateRegressionPercentagePoints": 5,
+  "maxAdditionalUngroundedClaimFailures": 0,
+  "maxAdditionalMissingExpectedFactFailures": 1
+}
