@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 // Runs EvaluationRegressionGate from two saved snapshot files.
@@ -13,6 +14,11 @@ using System.Text.Json;
 // A policy path is used as given, the same way a snapshot path is used.
 // A missing policy file, invalid JSON, a missing field, or a negative limit exits 2.
 // The gate does not run on that input, so a broken policy is not a quality regression.
+// --validate-policy checks that same policy file and does not read a baseline or candidate snapshot.
+// It does not run the gate, and it does not write a quality report.
+// A valid policy prints its limits and exits 0.
+// A missing or invalid policy exits 2 and names the policy file, using the same file error as a gate run.
+// This option requires --policy. It cannot be combined with --baseline, --candidate, or --report.
 // --report writes EvaluationQualityReport as JSON. The report copies the gate result.
 // It does not apply the policy again, and it has no timestamp.
 // A missing or invalid snapshot still has an outcome: status Failed, exit code 2, and the file error.
@@ -36,7 +42,7 @@ public static class EvaluationRegressionGateRunner
     public const int InvalidSnapshotExitCode = 2;
 
     public const string Usage =
-        $"Usage: {CommandName} --baseline <snapshot.json> --candidate <snapshot.json> [--policy <policy.json>] [--report <report.json>]";
+        $"Usage: {CommandName} --baseline <snapshot.json> --candidate <snapshot.json> [--policy <policy.json>] [--report <report.json>] | {CommandName} --validate-policy --policy <policy.json>";
 
     private const string BaselineOption = "--baseline";
 
@@ -45,6 +51,8 @@ public static class EvaluationRegressionGateRunner
     private const string PolicyOption = "--policy";
 
     private const string ReportOption = "--report";
+
+    private const string ValidatePolicyOption = "--validate-policy";
 
     public static bool IsInvocation(IReadOnlyList<string>? args) =>
         args is { Count: > 0 } &&
@@ -59,10 +67,16 @@ public static class EvaluationRegressionGateRunner
                 out var candidatePath,
                 out var policyPath,
                 out var reportPath,
+                out var validatePolicy,
                 out var parseError))
         {
             error.WriteLine(parseError);
             return InvalidSnapshotExitCode;
+        }
+
+        if (validatePolicy)
+        {
+            return ValidatePolicy(policyPath, output, error);
         }
 
         if (policyPath is null)
@@ -192,12 +206,14 @@ public static class EvaluationRegressionGateRunner
         out string candidatePath,
         out string? policyPath,
         out string? reportPath,
+        out bool validatePolicy,
         out string error)
     {
         baselinePath = "";
         candidatePath = "";
         policyPath = null;
         reportPath = null;
+        validatePolicy = false;
         if (!IsInvocation(args))
         {
             error = Usage;
@@ -209,6 +225,7 @@ public static class EvaluationRegressionGateRunner
         string? candidate = null;
         string? policy = null;
         string? report = null;
+        var validate = false;
         for (var index = 1; index < arguments.Count; index++)
         {
             var argument = arguments[index];
@@ -252,8 +269,47 @@ public static class EvaluationRegressionGateRunner
                 continue;
             }
 
+            if (IsOption(argument, ValidatePolicyOption))
+            {
+                if (validate)
+                {
+                    error = $"The {ValidatePolicyOption} option was provided more than once. {Usage}";
+                    return false;
+                }
+
+                if (argument.StartsWith(ValidatePolicyOption + "=", StringComparison.OrdinalIgnoreCase))
+                {
+                    error = $"The {ValidatePolicyOption} option does not take a value. {Usage}";
+                    return false;
+                }
+
+                validate = true;
+                continue;
+            }
+
             error = $"Unknown argument '{argument}'. {Usage}";
             return false;
+        }
+
+        if (validate)
+        {
+            if (baseline is not null || candidate is not null || report is not null)
+            {
+                error =
+                    $"The {ValidatePolicyOption} option cannot be used with {BaselineOption}, {CandidateOption}, or {ReportOption}. {Usage}";
+                return false;
+            }
+
+            if (policy is null)
+            {
+                error = $"The {PolicyOption} file was not provided. {Usage}";
+                return false;
+            }
+
+            validatePolicy = true;
+            policyPath = policy;
+            error = "";
+            return true;
         }
 
         if (baseline is null || candidate is null)
@@ -312,7 +368,8 @@ public static class EvaluationRegressionGateRunner
         IsOption(argument, BaselineOption) ||
         IsOption(argument, CandidateOption) ||
         IsOption(argument, PolicyOption) ||
-        IsOption(argument, ReportOption);
+        IsOption(argument, ReportOption) ||
+        IsOption(argument, ValidatePolicyOption);
 
     private static string ResolveReportPath(string path, string? baseDirectory)
     {
@@ -385,6 +442,38 @@ public static class EvaluationRegressionGateRunner
 
         return InvalidSnapshotExitCode;
     }
+
+    private static int ValidatePolicy(string? policyPath, TextWriter? output, TextWriter? error)
+    {
+        output ??= Console.Out;
+        error ??= Console.Error;
+        if (string.IsNullOrWhiteSpace(policyPath))
+        {
+            error.WriteLine($"The {PolicyOption} file was not provided. {Usage}");
+            return InvalidSnapshotExitCode;
+        }
+
+        if (!TryReadPolicy(policyPath, out var policy, out var policyError) || policy is null)
+        {
+            error.WriteLine(policyError);
+            return InvalidSnapshotExitCode;
+        }
+
+        output.WriteLine(FormatValidPolicy(policy));
+        return PassedExitCode;
+    }
+
+    private static string FormatValidPolicy(EvaluationRegressionPolicy policy)
+    {
+        return string.Join('\n',
+            "Quality gate policy: VALID",
+            $"Maximum failure-rate regression: {FormatPoints(policy.MaximumFailureRateRegression)} percentage points",
+            $"Maximum additional ungrounded-claim failures: {policy.MaximumUngroundedClaimIncrease.ToString(CultureInfo.InvariantCulture)}",
+            $"Maximum additional missing-fact failures: {policy.MaximumMissingExpectedFactIncrease.ToString(CultureInfo.InvariantCulture)}");
+    }
+
+    private static string FormatPoints(double value) =>
+        value.ToString("0.###", CultureInfo.InvariantCulture);
 
     private static bool TryReadPolicy(string path, out EvaluationRegressionPolicy? policy, out string error)
     {
