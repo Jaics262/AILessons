@@ -284,6 +284,168 @@ public sealed class QualityGatePolicyCommandTests
             File.ReadAllText(files.PathOf("pass-a.json")));
     }
 
+    [Fact]
+    public void Validate_policy_prints_the_checked_in_limits()
+    {
+        var policyPath = Path.Combine(
+            EvaluationRegressionGateRunner.ProjectDirectory(),
+            "Evaluation",
+            "quality-gate-policy.json");
+
+        var spaced = Run(
+            "regression-gate",
+            "--validate-policy",
+            "--policy",
+            policyPath);
+        var equals = Run(
+            "Regression-Gate",
+            "--policy=" + policyPath,
+            "--Validate-Policy");
+
+        Assert.Equal(EvaluationRegressionGateRunner.PassedExitCode, spaced.ExitCode);
+        Assert.Equal(ValidPolicyOutput(5d, 0, 1), spaced.Output);
+        Assert.Equal(string.Empty, spaced.Error);
+        Assert.Equal(spaced, equals);
+        Assert.DoesNotContain("Regression gate:", spaced.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validate_policy_prints_the_limits_from_the_file()
+    {
+        using var files = new TempFiles();
+        var policyPath = files.Write("policy.json", PolicyJson(5.5, 2, 0));
+
+        var (code, output, error) = Run(
+            "regression-gate",
+            "--policy",
+            policyPath,
+            "--validate-policy");
+
+        Assert.Equal(EvaluationRegressionGateRunner.PassedExitCode, code);
+        Assert.Equal(ValidPolicyOutput(5.5d, 2, 0), output);
+        Assert.Equal(string.Empty, error);
+    }
+
+    [Fact]
+    public void Validate_policy_exits_two_when_the_policy_file_is_missing_or_malformed()
+    {
+        using var files = new TempFiles();
+        var missing = files.PathOf("missing-policy.json");
+        var policyPath = files.Write("policy.json", "{");
+        var baselinePath = files.Write("baseline.json", BaselineJson);
+        var candidatePath = files.Write("candidate.json", CandidateJson);
+
+        var missingResult = Run("regression-gate", "--validate-policy", "--policy", missing);
+        var malformed = Run("regression-gate", "--validate-policy", "--policy", policyPath);
+        var gate = Run(Gate(baselinePath, candidatePath, policyPath));
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, missingResult.ExitCode);
+        Assert.Equal(string.Empty, missingResult.Output);
+        Assert.Equal($"The policy file '{missing}' was not found.{Environment.NewLine}", missingResult.Error);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, malformed.ExitCode);
+        Assert.Equal(string.Empty, malformed.Output);
+        Assert.Equal(gate.Error, malformed.Error);
+        Assert.Equal(
+            $"The policy file '{policyPath}' is not valid. {MalformedPolicyMessage}{Environment.NewLine}",
+            malformed.Error);
+    }
+
+    [Theory]
+    [MemberData(nameof(MissingRequiredFields))]
+    public void Validate_policy_exits_two_when_a_required_field_is_missing(string json, string fieldName)
+    {
+        using var files = new TempFiles();
+        var policyPath = files.Write("policy.json", json);
+
+        var (code, output, error) = Run("regression-gate", "--validate-policy", "--policy", policyPath);
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, code);
+        Assert.Equal(string.Empty, output);
+        Assert.Equal(
+            $"The policy file '{policyPath}' is not valid. The quality gate policy is missing '{fieldName}'.{Environment.NewLine}",
+            error);
+    }
+
+    [Theory]
+    [MemberData(nameof(NegativeThresholds))]
+    public void Validate_policy_exits_two_when_a_threshold_is_negative(string json, string message)
+    {
+        using var files = new TempFiles();
+        var policyPath = files.Write("policy.json", json);
+
+        var (code, output, error) = Run("regression-gate", "--validate-policy", "--policy", policyPath);
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, code);
+        Assert.Equal(string.Empty, output);
+        Assert.Equal(
+            $"The policy file '{policyPath}' is not valid. {message}{Environment.NewLine}",
+            error);
+    }
+
+    [Fact]
+    public void Validate_policy_requires_a_policy_file_and_does_not_read_snapshots()
+    {
+        using var files = new TempFiles();
+        var policyPath = files.Write("policy.json", PolicyJson(5, 0, 1));
+        var missingSnapshot = files.PathOf("missing-snapshot.json");
+
+        var omitted = Run("regression-gate", "--validate-policy");
+        var blank = Run("regression-gate", "--validate-policy", "--policy=");
+        var repeated = Run(
+            "regression-gate",
+            "--validate-policy",
+            "--validate-policy",
+            "--policy",
+            policyPath);
+        var valued = Run("regression-gate", "--validate-policy=true", "--policy", policyPath);
+        var combined = Run(
+            "regression-gate",
+            "--validate-policy",
+            "--policy",
+            policyPath,
+            "--baseline",
+            missingSnapshot,
+            "--candidate",
+            missingSnapshot,
+            "--report",
+            files.PathOf("quality.json"));
+
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, omitted.ExitCode);
+        Assert.Contains("The --policy file was not provided.", omitted.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, blank.ExitCode);
+        Assert.Contains("The --policy file was not provided.", blank.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, repeated.ExitCode);
+        Assert.Contains("The --validate-policy option was provided more than once.", repeated.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, valued.ExitCode);
+        Assert.Contains("The --validate-policy option does not take a value.", valued.Error, StringComparison.Ordinal);
+        Assert.Equal(EvaluationRegressionGateRunner.InvalidSnapshotExitCode, combined.ExitCode);
+        Assert.Contains(
+            "The --validate-policy option cannot be used with --baseline, --candidate, or --report.",
+            combined.Error,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(missingSnapshot, combined.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", omitted.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", blank.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", combined.Error, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, omitted.Output);
+        Assert.Equal(string.Empty, blank.Output);
+        Assert.Equal(string.Empty, repeated.Output);
+        Assert.Equal(string.Empty, valued.Output);
+        Assert.Equal(string.Empty, combined.Output);
+        Assert.False(File.Exists(files.PathOf("quality.json")));
+    }
+
+    private static string ValidPolicyOutput(double failureRate, int ungrounded, int missing)
+    {
+        var points = failureRate.ToString("0.###", CultureInfo.InvariantCulture);
+        return string.Join('\n',
+            "Quality gate policy: VALID",
+            $"Maximum failure-rate regression: {points} percentage points",
+            $"Maximum additional ungrounded-claim failures: {ungrounded.ToString(CultureInfo.InvariantCulture)}",
+            $"Maximum additional missing-fact failures: {missing.ToString(CultureInfo.InvariantCulture)}")
+            + Environment.NewLine;
+    }
+
     private static (int ExitCode, string Output, string Error) Run(params string[] args)
     {
         using var output = new StringWriter();
