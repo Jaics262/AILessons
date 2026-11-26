@@ -100,6 +100,26 @@ public static class EvaluationRegressionPolicyJson
         return value;
     }
 
+    // Bytes of the policy limits the gate applied when no policy file was read.
+    // Property order and names match the policy file. The same policy has the same bytes.
+    public static byte[] CanonicalBytes(EvaluationRegressionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber(MaximumFailureRateRegressionProperty, policy.MaximumFailureRateRegression);
+            writer.WriteNumber(MaximumUngroundedClaimIncreaseProperty, policy.MaximumUngroundedClaimIncrease);
+            writer.WriteNumber(
+                MaximumMissingExpectedFactIncreaseProperty,
+                policy.MaximumMissingExpectedFactIncrease);
+            writer.WriteEndObject();
+        }
+
+        return stream.ToArray();
+    }
+
     private static int ReadNonNegativeInt(
         IReadOnlyDictionary<string, JsonElement> properties,
         string name)

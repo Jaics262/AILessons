@@ -4,7 +4,9 @@
 // The failure-rate change is the gate comparison's FailureRateChange: candidate minus baseline.
 // This report records that result. It does not apply the policy again.
 // A count or rate that was not loaded is null. 0 is a real rate, not a stand-in for a missing file.
-// There is no timestamp. The same inputs produce the same report.
+// Metadata, when a run recorded it, names the dataset and policy bytes and the UTC time of that run.
+// The same input bytes keep the same fingerprints. The timestamp changes when the run time changes.
+// Those fingerprints do not make a nondeterministic evaluation repeat.
 public sealed class EvaluationQualityReport
 {
     public const string PassedStatus = "Passed";
@@ -19,7 +21,8 @@ public sealed class EvaluationQualityReport
         double? candidateFailureRate,
         double? failureRateChangePercentagePoints,
         IReadOnlyList<string> failureReasons,
-        int exitCode)
+        int exitCode,
+        EvaluationRunMetadata? metadata = null)
     {
         Status = RequireStatus(status);
         BaselineCaseCount = RequireCount(baselineCaseCount);
@@ -29,6 +32,7 @@ public sealed class EvaluationQualityReport
         FailureRateChangePercentagePoints = RequireRate(failureRateChangePercentagePoints);
         FailureReasons = failureReasons;
         ExitCode = RequireExitCode(exitCode, Status, FailureReasons);
+        Metadata = metadata;
     }
 
     public string Status { get; }
@@ -46,6 +50,8 @@ public sealed class EvaluationQualityReport
     public IReadOnlyList<string> FailureReasons { get; }
 
     public int ExitCode { get; }
+
+    public EvaluationRunMetadata? Metadata { get; }
 
     public static EvaluationQualityReport From(EvaluationRegressionResult result)
     {
@@ -116,7 +122,8 @@ public sealed class EvaluationQualityReport
         double? candidateFailureRate,
         double? failureRateChangePercentagePoints,
         IReadOnlyList<string> failureReasons,
-        int exitCode)
+        int exitCode,
+        EvaluationRunMetadata? metadata = null)
     {
         return new EvaluationQualityReport(
             status,
@@ -126,7 +133,41 @@ public sealed class EvaluationQualityReport
             candidateFailureRate,
             failureRateChangePercentagePoints,
             CopyReasons(failureReasons),
-            exitCode);
+            exitCode,
+            metadata);
+    }
+
+    public EvaluationQualityReport WithMetadata(EvaluationRunMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        return new EvaluationQualityReport(
+            Status,
+            BaselineCaseCount,
+            CandidateCaseCount,
+            BaselineFailureRate,
+            CandidateFailureRate,
+            FailureRateChangePercentagePoints,
+            FailureReasons,
+            ExitCode,
+            metadata);
+    }
+
+    public EvaluationQualityReport WithoutMetadata()
+    {
+        if (Metadata is null)
+        {
+            return this;
+        }
+
+        return new EvaluationQualityReport(
+            Status,
+            BaselineCaseCount,
+            CandidateCaseCount,
+            BaselineFailureRate,
+            CandidateFailureRate,
+            FailureRateChangePercentagePoints,
+            FailureReasons,
+            ExitCode);
     }
 
     private static string RequireStatus(string status)

@@ -171,7 +171,7 @@ public sealed class EvaluationQualityReportTests
         Assert.Equal(JsonValueKind.Object, report.ValueKind);
         Assert.Equal("Passed", report.GetProperty("status").GetString());
         Assert.Equal(0, report.GetProperty("exitCode").GetInt32());
-        Assert.Equal(PassedJson, File.ReadAllText(reportPath));
+        Assert.Equal(PassedJson, WithoutMetadata(File.ReadAllText(reportPath)));
         Assert.Equal((byte)'{', File.ReadAllBytes(reportPath)[0]);
     }
 
@@ -348,7 +348,7 @@ public sealed class EvaluationQualityReportTests
         Assert.Equal([reason], ReadReasons(report));
         Assert.DoesNotContain("The baseline snapshot is missing.", File.ReadAllText(reportPath), StringComparison.Ordinal);
         Assert.DoesNotContain("Regression gate:", output, StringComparison.Ordinal);
-        AssertPropertyNames(File.ReadAllText(reportPath));
+        AssertRecordedPropertyNames(File.ReadAllText(reportPath));
     }
 
     [Fact]
@@ -428,17 +428,22 @@ public sealed class EvaluationQualityReportTests
         var reportPath = files.PathOf("quality.json");
 
         var first = Execute(baselinePath, candidatePath, reportPath: reportPath);
-        var firstBytes = File.ReadAllBytes(reportPath);
+        var firstJson = File.ReadAllText(reportPath);
         var second = Execute(baselinePath, candidatePath, reportPath: reportPath);
-        var secondBytes = File.ReadAllBytes(reportPath);
+        var secondJson = File.ReadAllText(reportPath);
+        var firstReport = EvaluationQualityReportJson.Deserialize(firstJson);
+        var secondReport = EvaluationQualityReportJson.Deserialize(secondJson);
 
         Assert.Equal(first.ExitCode, second.ExitCode);
         Assert.Equal(first.Output, second.Output);
         Assert.Equal(first.Error, second.Error);
-        Assert.Equal(firstBytes, secondBytes);
-        var json = System.Text.Encoding.UTF8.GetString(firstBytes);
-        Assert.DoesNotContain("timestamp", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("evaluatedAt", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(WithoutMetadata(firstJson), WithoutMetadata(secondJson));
+        Assert.Equal(firstReport.Metadata!.DatasetFingerprint, secondReport.Metadata!.DatasetFingerprint);
+        Assert.Equal(firstReport.Metadata.PolicyFingerprint, secondReport.Metadata.PolicyFingerprint);
+        Assert.Matches(
+            "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+            firstReport.Metadata.RunTimestampUtcText);
+        Assert.DoesNotContain("evaluatedAt", firstJson, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(JsonValueKind.Object, Read(reportPath).ValueKind);
     }
 
@@ -507,7 +512,7 @@ public sealed class EvaluationQualityReportTests
         Assert.Equal(EvaluationRegressionGateRunner.PassedExitCode, code);
         Assert.Equal(result.Report + Environment.NewLine, output);
         Assert.Equal(string.Empty, error);
-        Assert.Equal(PassedJson, File.ReadAllText(reportPath));
+        Assert.Equal(PassedJson, WithoutMetadata(File.ReadAllText(reportPath)));
     }
 
     [Fact]
@@ -577,6 +582,22 @@ public sealed class EvaluationQualityReportTests
         "  \"failureReasons\": [],",
         "  \"exitCode\": 0",
         "}");
+
+    private static string WithoutMetadata(string json) =>
+        EvaluationQualityReportJson.Serialize(
+            EvaluationQualityReportJson.Deserialize(json).WithoutMetadata());
+
+    private static void AssertRecordedPropertyNames(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var names = new List<string>();
+        foreach (var property in document.RootElement.EnumerateObject())
+        {
+            names.Add(property.Name);
+        }
+
+        Assert.Equal([.. PropertyNames, "metadata"], names);
+    }
 
     private static void AssertPropertyNames(string json)
     {
