@@ -3,8 +3,10 @@ using System.Text.Json;
 
 // Saved form of one EvaluationQualityReport.
 // Property names are camelCase and fixed. Every property is written.
-// A missing count or rate is JSON null. The file has no timestamp.
-// Indentation uses \n, so the same report has the same bytes on every machine.
+// A missing count or rate is JSON null.
+// Metadata is written only when the run recorded it. A saved report without metadata still loads.
+// Indentation uses \n, so the same report fields have the same bytes on every machine.
+// The timestamp inside metadata changes with the run. The fingerprints do not, for the same file bytes.
 // Write creates the report directory when it does not already exist.
 // Deserialize reads that saved report. It does not run the regression gate or apply its policy.
 public static class EvaluationQualityReportJson
@@ -25,6 +27,14 @@ public static class EvaluationQualityReportJson
 
     public const string ExitCodeProperty = "exitCode";
 
+    public const string MetadataProperty = "metadata";
+
+    public const string DatasetFingerprintProperty = "datasetFingerprint";
+
+    public const string PolicyFingerprintProperty = "policyFingerprint";
+
+    public const string RunTimestampUtcProperty = "runTimestampUtc";
+
     private static readonly HashSet<string> PropertyNames = new(StringComparer.Ordinal)
     {
         StatusProperty,
@@ -34,7 +44,15 @@ public static class EvaluationQualityReportJson
         CandidateFailureRateProperty,
         FailureRateChangePercentagePointsProperty,
         FailureReasonsProperty,
-        ExitCodeProperty
+        ExitCodeProperty,
+        MetadataProperty
+    };
+
+    private static readonly HashSet<string> MetadataPropertyNames = new(StringComparer.Ordinal)
+    {
+        DatasetFingerprintProperty,
+        PolicyFingerprintProperty,
+        RunTimestampUtcProperty
     };
 
     public static string Serialize(EvaluationQualityReport report)
@@ -65,6 +83,16 @@ public static class EvaluationQualityReportJson
 
             writer.WriteEndArray();
             writer.WriteNumber(ExitCodeProperty, report.ExitCode);
+            if (report.Metadata is EvaluationRunMetadata metadata)
+            {
+                writer.WritePropertyName(MetadataProperty);
+                writer.WriteStartObject();
+                WriteFingerprint(writer, DatasetFingerprintProperty, metadata.DatasetFingerprint);
+                WriteFingerprint(writer, PolicyFingerprintProperty, metadata.PolicyFingerprint);
+                writer.WriteString(RunTimestampUtcProperty, metadata.RunTimestampUtcText);
+                writer.WriteEndObject();
+            }
+
             writer.WriteEndObject();
         }
 
@@ -155,7 +183,8 @@ public static class EvaluationQualityReportJson
                 ReadNullableDouble(properties, CandidateFailureRateProperty),
                 ReadNullableDouble(properties, FailureRateChangePercentagePointsProperty),
                 ReadReasons(properties),
-                ReadInt32(properties, ExitCodeProperty));
+                ReadInt32(properties, ExitCodeProperty),
+                ReadMetadata(properties));
         }
         catch (ArgumentException exception)
         {
@@ -269,5 +298,98 @@ public static class EvaluationQualityReportJson
         }
 
         writer.WriteNull(name);
+    }
+
+    private static void WriteFingerprint(Utf8JsonWriter writer, string name, string? fingerprint)
+    {
+        if (fingerprint is null)
+        {
+            writer.WriteNull(name);
+            return;
+        }
+
+        writer.WriteString(name, fingerprint);
+    }
+
+    private static EvaluationRunMetadata? ReadMetadata(IReadOnlyDictionary<string, JsonElement> properties)
+    {
+        if (!properties.TryGetValue(MetadataProperty, out var element))
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException($"'{MetadataProperty}' must be an object.");
+        }
+
+        var metadata = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!metadata.TryAdd(property.Name, property.Value))
+            {
+                throw new JsonException(
+                    $"The quality report property '{property.Name}' is listed more than once.");
+            }
+        }
+
+        foreach (var name in metadata.Keys)
+        {
+            if (!MetadataPropertyNames.Contains(name))
+            {
+                throw new JsonException(
+                    $"The quality report property '{name}' is not recognized.");
+            }
+        }
+
+        try
+        {
+            return new EvaluationRunMetadata(
+                ReadFingerprint(metadata, DatasetFingerprintProperty),
+                ReadFingerprint(metadata, PolicyFingerprintProperty),
+                ReadTimestamp(metadata));
+        }
+        catch (ArgumentException exception)
+        {
+            throw new JsonException(exception.Message, exception);
+        }
+    }
+
+    private static string? ReadFingerprint(IReadOnlyDictionary<string, JsonElement> properties, string name)
+    {
+        var element = Require(properties, name);
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.String || element.GetString() is not string value)
+        {
+            throw new JsonException($"'{name}' must be a string or null.");
+        }
+
+        return value;
+    }
+
+    private static DateTimeOffset ReadTimestamp(IReadOnlyDictionary<string, JsonElement> properties)
+    {
+        var element = Require(properties, RunTimestampUtcProperty);
+        if (element.ValueKind != JsonValueKind.String || element.GetString() is not string value)
+        {
+            throw new JsonException($"'{RunTimestampUtcProperty}' must be a UTC timestamp.");
+        }
+
+        if (!DateTimeOffset.TryParseExact(
+                value,
+                EvaluationRunMetadata.TimestampFormat,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var timestamp))
+        {
+            throw new JsonException(
+                $"'{RunTimestampUtcProperty}' must be a UTC timestamp like 2026-11-26T10:20:00Z.");
+        }
+
+        return timestamp;
     }
 }

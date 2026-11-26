@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 
 // Runs EvaluationRegressionGate from two saved snapshot files.
@@ -20,7 +21,11 @@ using System.Text.Json;
 // A missing or invalid policy exits 2 and names the policy file, using the same file error as a gate run.
 // This option requires --policy. It cannot be combined with --baseline, --candidate, or --report.
 // --report writes EvaluationQualityReport as JSON. The report copies the gate result.
-// It does not apply the policy again, and it has no timestamp.
+// It does not apply the policy again.
+// Metadata records the baseline and candidate bytes as the dataset fingerprint,
+// the policy bytes that were read, and the UTC time of this run.
+// A command that omits --policy fingerprints the default policy's canonical JSON.
+// A missing input leaves that fingerprint null. The timestamp still records the run.
 // A missing or invalid snapshot still has an outcome: status Failed, exit code 2, and the file error.
 // An invalid policy has the same outcome. Counts from a snapshot that did load are kept.
 // The report includes that outcome when a report path was given. A count or rate that was not loaded
@@ -58,7 +63,11 @@ public static class EvaluationRegressionGateRunner
         args is { Count: > 0 } &&
         string.Equals(args[0], CommandName, StringComparison.OrdinalIgnoreCase);
 
-    public static int Run(IReadOnlyList<string>? args, TextWriter? output = null, TextWriter? error = null)
+    public static int Run(
+        IReadOnlyList<string>? args,
+        TextWriter? output = null,
+        TextWriter? error = null,
+        DateTimeOffset? runTimestampUtc = null)
     {
         error ??= Console.Error;
         if (!TryParse(
@@ -81,7 +90,13 @@ public static class EvaluationRegressionGateRunner
 
         if (policyPath is null)
         {
-            return Run(baselinePath, candidatePath, output, error, reportPath: reportPath);
+            return Run(
+                baselinePath,
+                candidatePath,
+                output,
+                error,
+                reportPath: reportPath,
+                runTimestampUtc: runTimestampUtc);
         }
 
         if (reportPath is not null && string.IsNullOrWhiteSpace(reportPath))
@@ -96,12 +111,27 @@ public static class EvaluationRegressionGateRunner
             return InvalidSnapshotExitCode;
         }
 
-        if (!TryReadPolicy(policyPath, out var policy, out var policyError) || policy is null)
+        if (!TryReadPolicy(policyPath, out var policy, out var policyContent, out var policyError) || policy is null)
         {
-            return FailInvalidPolicy(policyError, baselinePath, candidatePath, reportPath, error);
+            return FailInvalidPolicy(
+                policyError,
+                baselinePath,
+                candidatePath,
+                reportPath,
+                error,
+                policyContent,
+                runTimestampUtc);
         }
 
-        return Run(baselinePath, candidatePath, output, error, policy, reportPath: reportPath);
+        return Run(
+            baselinePath,
+            candidatePath,
+            output,
+            error,
+            policy,
+            reportPath: reportPath,
+            policyContent: policyContent,
+            runTimestampUtc: runTimestampUtc);
     }
 
     public static string ProjectDirectory()
@@ -139,11 +169,14 @@ public static class EvaluationRegressionGateRunner
         TextWriter? error = null,
         EvaluationRegressionPolicy? policy = null,
         string? reportPath = null,
-        string? reportBaseDirectory = null)
+        string? reportBaseDirectory = null,
+        byte[]? policyContent = null,
+        DateTimeOffset? runTimestampUtc = null)
     {
         output ??= Console.Out;
         error ??= Console.Error;
         policy ??= EvaluationRegressionPolicy.Default;
+        var timestamp = ToUtc(runTimestampUtc);
         if (reportPath is not null && string.IsNullOrWhiteSpace(reportPath))
         {
             error.WriteLine($"The {ReportOption} file was not provided. {Usage}");
@@ -156,8 +189,8 @@ public static class EvaluationRegressionGateRunner
             reportPath = ResolveReportPath(reportPath, reportBaseDirectory);
         }
 
-        var baselineReady = TryRead(baselinePath, "baseline", out var baseline, out var baselineError);
-        var candidateReady = TryRead(candidatePath, "candidate", out var candidate, out var candidateError);
+        var baselineReady = TryRead(baselinePath, "baseline", out var baseline, out var baselineContent, out var baselineError);
+        var candidateReady = TryRead(candidatePath, "candidate", out var candidate, out var candidateContent, out var candidateError);
         if (!baselineReady || !candidateReady || baseline is null || candidate is null)
         {
             var reasons = new List<string>();
@@ -179,7 +212,12 @@ public static class EvaluationRegressionGateRunner
                     reportPath,
                     reportDisplayPath ?? reportPath,
                     EvaluationQualityReport.FromSnapshotLoadFailure(baseline, candidate, reasons),
-                    error);
+                    error,
+                    baselineContent,
+                    candidateContent,
+                    policyContent,
+                    policy,
+                    timestamp);
             }
 
             return InvalidSnapshotExitCode;
@@ -194,7 +232,12 @@ public static class EvaluationRegressionGateRunner
                 reportPath,
                 reportDisplayPath ?? reportPath,
                 EvaluationQualityReport.From(result),
-                error);
+                error,
+                baselineContent,
+                candidateContent,
+                policyContent,
+                policy,
+                timestamp);
         }
 
         return exitCode;
@@ -389,11 +432,21 @@ public static class EvaluationRegressionGateRunner
         string path,
         string displayPath,
         EvaluationQualityReport report,
-        TextWriter error)
+        TextWriter error,
+        byte[]? baselineContent,
+        byte[]? candidateContent,
+        byte[]? policyContent,
+        EvaluationRegressionPolicy? appliedPolicy,
+        DateTimeOffset runTimestampUtc)
     {
         try
         {
-            EvaluationQualityReportJson.Write(path, report);
+            EvaluationQualityReportJson.Write(
+                path,
+                report.WithMetadata(new EvaluationRunMetadata(
+                    DatasetFingerprint(baselineContent, candidateContent),
+                    PolicyFingerprint(policyContent, appliedPolicy),
+                    runTimestampUtc)));
         }
         catch (IOException exception)
         {
@@ -412,12 +465,14 @@ public static class EvaluationRegressionGateRunner
         string baselinePath,
         string candidatePath,
         string? reportPath,
-        TextWriter error)
+        TextWriter error,
+        byte[]? policyContent,
+        DateTimeOffset? runTimestampUtc)
     {
         error.WriteLine(policyError);
         var reasons = new List<string> { policyError };
-        var baselineReady = TryRead(baselinePath, "baseline", out var baseline, out var baselineError);
-        var candidateReady = TryRead(candidatePath, "candidate", out var candidate, out var candidateError);
+        var baselineReady = TryRead(baselinePath, "baseline", out var baseline, out var baselineContent, out var baselineError);
+        var candidateReady = TryRead(candidatePath, "candidate", out var candidate, out var candidateContent, out var candidateError);
         if (!baselineReady)
         {
             error.WriteLine(baselineError);
@@ -437,7 +492,12 @@ public static class EvaluationRegressionGateRunner
                 ResolveReportPath(reportPath, null),
                 reportDisplayPath,
                 EvaluationQualityReport.FromInvalidInput(baseline, candidate, reasons),
-                error);
+                error,
+                baselineContent,
+                candidateContent,
+                policyContent,
+                appliedPolicy: null,
+                ToUtc(runTimestampUtc));
         }
 
         return InvalidSnapshotExitCode;
@@ -453,7 +513,7 @@ public static class EvaluationRegressionGateRunner
             return InvalidSnapshotExitCode;
         }
 
-        if (!TryReadPolicy(policyPath, out var policy, out var policyError) || policy is null)
+        if (!TryReadPolicy(policyPath, out var policy, out _, out var policyError) || policy is null)
         {
             error.WriteLine(policyError);
             return InvalidSnapshotExitCode;
@@ -475,23 +535,15 @@ public static class EvaluationRegressionGateRunner
     private static string FormatPoints(double value) =>
         value.ToString("0.###", CultureInfo.InvariantCulture);
 
-    private static bool TryReadPolicy(string path, out EvaluationRegressionPolicy? policy, out string error)
+    private static bool TryReadPolicy(
+        string path,
+        out EvaluationRegressionPolicy? policy,
+        out byte[]? content,
+        out string error)
     {
         policy = null;
-        string json;
-        try
+        if (!TryReadFile(path, $"The policy file '{path}'", out content, out var json, out error))
         {
-            json = File.ReadAllText(path);
-        }
-        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
-        {
-            error = $"The policy file '{path}' was not found.";
-            return false;
-        }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
-        {
-            error = $"The policy file '{path}' could not be read. {exception.Message}";
             return false;
         }
 
@@ -509,29 +561,23 @@ public static class EvaluationRegressionGateRunner
         return true;
     }
 
-    private static bool TryRead(string? path, string role, out EvaluationSnapshot? snapshot, out string error)
+    private static bool TryRead(
+        string? path,
+        string role,
+        out EvaluationSnapshot? snapshot,
+        out byte[]? content,
+        out string error)
     {
         snapshot = null;
+        content = null;
         if (string.IsNullOrWhiteSpace(path))
         {
             error = $"The {role} snapshot file was not provided.";
             return false;
         }
 
-        string json;
-        try
+        if (!TryReadFile(path, $"The {role} snapshot file '{path}'", out content, out var json, out error))
         {
-            json = File.ReadAllText(path);
-        }
-        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
-        {
-            error = $"The {role} snapshot file '{path}' was not found.";
-            return false;
-        }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
-        {
-            error = $"The {role} snapshot file '{path}' could not be read. {exception.Message}";
             return false;
         }
 
@@ -548,4 +594,67 @@ public static class EvaluationRegressionGateRunner
         error = "";
         return true;
     }
+
+    private static bool TryReadFile(
+        string path,
+        string label,
+        out byte[]? content,
+        out string json,
+        out string error)
+    {
+        content = null;
+        json = "";
+        try
+        {
+            content = File.ReadAllBytes(path);
+            json = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                .GetString(content);
+            if (json.Length > 0 && json[0] == '\uFEFF')
+            {
+                json = json[1..];
+            }
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            error = $"{label} was not found.";
+            return false;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or DecoderFallbackException)
+        {
+            error = $"{label} could not be read. {exception.Message}";
+            return false;
+        }
+
+        error = "";
+        return true;
+    }
+
+    private static string? DatasetFingerprint(byte[]? baselineContent, byte[]? candidateContent)
+    {
+        if (baselineContent is null || candidateContent is null)
+        {
+            return null;
+        }
+
+        return EvaluationInputFingerprints.Dataset(baselineContent, candidateContent);
+    }
+
+    private static string? PolicyFingerprint(byte[]? policyContent, EvaluationRegressionPolicy? appliedPolicy)
+    {
+        if (policyContent is not null)
+        {
+            return EvaluationInputFingerprints.Policy(policyContent);
+        }
+
+        if (appliedPolicy is not null)
+        {
+            return EvaluationInputFingerprints.Policy(EvaluationRegressionPolicyJson.CanonicalBytes(appliedPolicy));
+        }
+
+        return null;
+    }
+
+    private static DateTimeOffset ToUtc(DateTimeOffset? runTimestampUtc) =>
+        (runTimestampUtc ?? DateTimeOffset.UtcNow).ToUniversalTime();
 }
