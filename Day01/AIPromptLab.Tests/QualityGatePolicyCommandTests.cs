@@ -217,7 +217,10 @@ public sealed class QualityGatePolicyCommandTests
         Assert.False(expected.Passed);
         Assert.Equal(5d, EvaluationRegressionPolicy.Default.MaximumFailureRateRegression);
         AssertReport(expected, omitted);
-        Assert.Equal(EvaluationQualityReportJson.Serialize(EvaluationQualityReport.From(expected)), File.ReadAllText(reportPath));
+        Assert.Equal(
+            EvaluationQualityReportJson.Serialize(EvaluationQualityReport.From(expected)),
+            EvaluationQualityReportJson.Serialize(
+                EvaluationQualityReportJson.Deserialize(File.ReadAllText(reportPath)).WithoutMetadata()));
         Assert.Equal(expected.FailureReasons, report.FailureReasons);
         Assert.Equal(EvaluationRegressionGateRunner.FailedExitCode, report.ExitCode);
         Assert.Equal(EvaluationRegressionGateRunner.PassedExitCode, loose.ExitCode);
@@ -275,13 +278,14 @@ public sealed class QualityGatePolicyCommandTests
             omitted.First.Output);
         Assert.Equal(stricter.First.Output, omitted.First.Output);
         Assert.Equal(string.Empty, invalid.First.Output);
-        Assert.Equal(File.ReadAllText(files.PathOf("pass-a.json")), File.ReadAllText(files.PathOf("pass-b.json")));
-        Assert.Equal(File.ReadAllText(files.PathOf("fail-a.json")), File.ReadAllText(files.PathOf("fail-b.json")));
-        Assert.Equal(File.ReadAllText(files.PathOf("default-a.json")), File.ReadAllText(files.PathOf("default-b.json")));
+        AssertSameRecordedInputs(files.PathOf("pass-a.json"), files.PathOf("pass-b.json"));
+        AssertSameRecordedInputs(files.PathOf("fail-a.json"), files.PathOf("fail-b.json"));
+        AssertSameRecordedInputs(files.PathOf("default-a.json"), files.PathOf("default-b.json"));
         Assert.Equal(
             EvaluationQualityReportJson.Serialize(EvaluationQualityReport.From(
                 EvaluationRegressionGate.Evaluate(baseline, candidate, passingPolicy))),
-            File.ReadAllText(files.PathOf("pass-a.json")));
+            EvaluationQualityReportJson.Serialize(
+                EvaluationQualityReportJson.Deserialize(File.ReadAllText(files.PathOf("pass-a.json"))).WithoutMetadata()));
     }
 
     [Fact]
@@ -461,6 +465,17 @@ public sealed class QualityGatePolicyCommandTests
         return (
             new CommandResult(first.ExitCode, first.Output, first.Error),
             new CommandResult(second.ExitCode, second.Output, second.Error));
+    }
+
+    private static void AssertSameRecordedInputs(string leftPath, string rightPath)
+    {
+        var left = EvaluationQualityReportJson.Deserialize(File.ReadAllText(leftPath));
+        var right = EvaluationQualityReportJson.Deserialize(File.ReadAllText(rightPath));
+        Assert.Equal(
+            EvaluationQualityReportJson.Serialize(left.WithoutMetadata()),
+            EvaluationQualityReportJson.Serialize(right.WithoutMetadata()));
+        Assert.Equal(left.Metadata!.DatasetFingerprint, right.Metadata!.DatasetFingerprint);
+        Assert.Equal(left.Metadata.PolicyFingerprint, right.Metadata.PolicyFingerprint);
     }
 
     private static void AssertSameRun((CommandResult First, CommandResult Second) run)
